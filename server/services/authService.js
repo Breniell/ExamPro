@@ -1,75 +1,139 @@
-// src/services/authService.js
+// server/services/authService.js
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const pool = require('../config/database');
 
-// Utiliser une valeur par défaut (10) si la variable d'environnement n'est pas définie
+// Bcrypt: par défaut 10 si non défini
 const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS, 10) || 10;
-const JWT_SECRET = process.env.JWT_SECRET;
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN;
+
+/* -------- Helpers JWT -------- */
+function normalizeExpiresIn(input) {
+  // défaut: 24h
+  if (!input) return '24h';
+  const raw = String(input).trim();
+  // nombre pur => secondes (ex: "86400")
+  if (/^\d+$/.test(raw)) return Number(raw);
+  // tolère "24 h" => "24h"
+  const compact = raw.replace(/\s+/g, '');
+  // formats supportés par jsonwebtoken: 60s, 10m, 24h, 7d, 1y...
+  if (/^\d+[smhdwy]$/.test(compact)) return compact;
+  // fallback safe
+  return '24h';
+}
+
+function getJwtSecret() {
+  const s = (process.env.JWT_SECRET || '').trim();
+  if (!s) {
+    const e = new Error('JWT_SECRET is not set');
+    e.status = 500;
+    throw e;
+  }
+  return s;
+}
+
+function signToken(payload) {
+  const secret = getJwtSecret();
+  const expiresIn = normalizeExpiresIn(process.env.JWT_EXPIRES_IN);
+  return jwt.sign(payload, secret, { expiresIn });
+}
+
+/* -------- Services -------- */
 
 async function registerUser({ email, password, firstName, lastName, role }) {
-  // Vérifier existence
-  const { rows } = await pool.query(`SELECT id FROM users WHERE email = $1`, [email]);
-  if (rows.length) throw { status: 400, message: 'User already exists' };
+  // Vérifier unicité email
+  const { rows: existing } = await pool.query(
+    `SELECT id FROM users WHERE email = $1 LIMIT 1`,
+    [email]
+  );
+  if (existing.length) {
+    const e = new Error('User already exists');
+    e.status = 400;
+    throw e;
+  }
 
-  // Hash password
+  // Rôle autorisé (par défaut student)
+  const allowedRoles = new Set(['student', 'teacher', 'admin']);
+  const safeRole = allowedRoles.has(role) ? role : 'student';
+
+  // Hash du mot de passe
   const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
   // Création
-  const result = await pool.query(
-    `INSERT INTO users (email, password_hash, first_name, last_name, role, email_verified)
-     VALUES ($1,$2,$3,$4,$5,true)
+  const { rows } = await pool.query(
+    `INSERT INTO users (email, password_hash, first_name, last_name, role, email_verified, is_active)
+     VALUES ($1,$2,$3,$4,$5,true,true)
      RETURNING id, email, first_name AS "firstName", last_name AS "lastName", role`,
-    [email, passwordHash, firstName, lastName, role]
+    [email, passwordHash, firstName || '', lastName || '', safeRole]
   );
-  const user = result.rows[0];
+  const user = rows[0];
 
-  // Générer token
-  const token = jwt.sign(
-    { userId: user.id, email: user.email, role: user.role },
-    JWT_SECRET,
-    { expiresIn: JWT_EXPIRES_IN }
-  );
+  // Token
+  const token = signToken({ userId: user.id, role: user.role });
 
   return { user, token };
 }
 
 async function loginUser({ email, password }) {
-  // Récupérer user
   const { rows } = await pool.query(
-    `SELECT id, email, password_hash, first_name AS "firstName", last_name AS "lastName", role, is_active
-     FROM users WHERE email = $1`, [email]
+    `SELECT id, email, password_hash, first_name, last_name, role, is_active
+     FROM users
+     WHERE email = $1
+     LIMIT 1`,
+    [email]
   );
-  const user = rows[0];
-  if (!user || !user.is_active) throw { status: 401, message: 'Invalid credentials or inactive account' };
+  const row = rows[0];
 
-  // Vérifier mot de passe
-  const valid = await bcrypt.compare(password, user.password_hash);
-  if (!valid) throw { status: 401, message: 'Invalid credentials' };
+  // Compte inexistant ou explicitement désactivé
+  if (!row || row.is_active === false) {
+    const e = new Error('Invalid credentials or inactive account');
+    e.status = 401;
+    throw e;
+  }
 
-  // Mettre à jour last_login
-  await pool.query(`UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = $1`, [user.id]);
+  const ok = await bcrypt.compare(password, row.password_hash || '');
+  if (!ok) {
+    const e = new Error('Invalid credentials');
+    e.status = 401;
+    throw e;
+  }
 
-  // Générer token
-  const token = jwt.sign(
-    { userId: user.id, email: user.email, role: user.role },
-    JWT_SECRET,
-    { expiresIn: JWT_EXPIRES_IN }
-  );
+  // Mettre à jour last_login (optionnel)
+  pool.query(`UPDATE users SET last_login = NOW() WHERE id = $1`, [row.id]).catch(() => {});
 
-  delete user.password_hash;
+  const token = signToken({ userId: row.id, role: row.role });
+
+  const user = {
+    id: row.id,
+    email: row.email,
+    role: row.role,
+    firstName: row.first_name || '',
+    lastName: row.last_name || '',
+  };
+
   return { user, token };
 }
 
 async function getCurrentUser(userId) {
   const { rows } = await pool.query(
-    `SELECT id, email, first_name AS "firstName", last_name AS "lastName", role, is_active
-     FROM users WHERE id = $1`, [userId]
+    `SELECT id, email, first_name, last_name, role, is_active
+     FROM users
+     WHERE id = $1
+     LIMIT 1`,
+    [userId]
   );
-  const user = rows[0];
-  if (!user) throw { status: 404, message: 'User not found' };
-  return user;
+  const row = rows[0];
+  if (!row || row.is_active === false) {
+    const e = new Error('User not found or inactive');
+    e.status = 404;
+    throw e;
+  }
+  return {
+    id: row.id,
+    email: row.email,
+    role: row.role,
+    firstName: row.first_name || '',
+    lastName: row.last_name || '',
+  };
 }
 
 module.exports = {
