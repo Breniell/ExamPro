@@ -27,6 +27,7 @@ router.get(
 router.post(
   '/:id/answers',
   authenticateToken,
+  requireRole(['student']),
   [
     param('id').isUUID().withMessage('Session id invalide'),
     body('question_id').isUUID().withMessage('question_id requis et doit être un UUID'),
@@ -53,8 +54,8 @@ router.post(
   requireRole(['student']),
   [
     param('id').isUUID().withMessage('Session id invalide'),
-    body('event_type').isString().notEmpty().withMessage('event_type requis'),
-    body('event_data').optional({ nullable: true }),
+    body('event_type').isString().withMessage('event_type requis'),
+    body('event_data').notEmpty().withMessage('event_data requis'),
     body('severity').optional().isIn(['low','medium','high']).withMessage('severity invalide'),
   ],
   sessionController.logSecurity

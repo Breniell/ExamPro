@@ -1,20 +1,13 @@
 // src/controllers/sessionController.js
 const { validationResult } = require('express-validator');
 const sessionService = require('../services/sessionService');
-const { emitSecurityLog } = require('../socket/proctor'); // 👈 diffusion temps réel
+const { emitSecurityLog } = require('../socket/proctor'); // diffusion temps réel
 
 const VALID_SEVERITIES = new Set(['low', 'medium', 'high']);
 
-function sendValidation(res, errors) {
-  return res.status(400).json({
-    error: 'Validation error',
-    details: errors.array().map(e => ({ field: e.param, message: e.msg })),
-  });
-}
-
 async function start(req, res) {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return sendValidation(res, errors);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
   try {
     const session = await sessionService.startSession({
@@ -42,7 +35,9 @@ async function getById(req, res) {
 
 async function answer(req, res) {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return sendValidation(res, errors);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array(), error: 'Validation error' });
+  }
 
   try {
     const ans = await sessionService.submitAnswer({
@@ -55,10 +50,8 @@ async function answer(req, res) {
     });
     res.json(ans);
   } catch (err) {
-    const status = err.status || 500;
-    const message = err.message || 'Internal server error';
-    if (status >= 500) console.error('Submit answer error:', err);
-    res.status(status).json({ error: message });
+    console.error('Submit answer error:', err);
+    res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
   }
 }
 
@@ -66,7 +59,7 @@ async function submit(req, res) {
   try {
     const session = await sessionService.submitExam(req.params.id, req.user.id);
 
-    // 🔎 Log non-bloquant “exam_submitted” + diffusion live
+    // Log informatif non-bloquant + diffusion live
     try {
       const logRow = await sessionService.logSecurityEvent({
         sessionId: req.params.id,
@@ -74,28 +67,31 @@ async function submit(req, res) {
         eventData: { by: req.user.id },
         severity: 'low',
       });
-      if (logRow && typeof emitSecurityLog === 'function') emitSecurityLog(logRow);
+      if (logRow) emitSecurityLog(logRow);
     } catch (e) {
       console.warn('submit() logSecurityEvent failed (non-blocking):', e?.message || e);
     }
 
     res.json({ message: 'Exam submitted', session });
   } catch (err) {
-    const status = err.status || 500;
-    const message = err.message || 'Internal server error';
-    if (status >= 500) console.error('Submit exam error:', err);
-    res.status(status).json({ error: message });
+    console.error('Submit exam error:', err);
+    res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
   }
 }
 
 async function logSecurity(req, res) {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return sendValidation(res, errors);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-  const { event_type, event_data, severity = 'low' } = req.body;
+  let { event_type, event_data, severity = 'low' } = req.body;
 
   if (!VALID_SEVERITIES.has(severity)) {
     return res.status(400).json({ error: 'Invalid severity (expected low|medium|high)' });
+  }
+
+  // Normaliser event_data en JSON
+  if (typeof event_data === 'string') {
+    try { event_data = JSON.parse(event_data); } catch { /* on laisse string */ }
   }
 
   try {
@@ -106,8 +102,7 @@ async function logSecurity(req, res) {
       severity,
     });
 
-    if (logRow && typeof emitSecurityLog === 'function') emitSecurityLog(logRow);
-
+    if (logRow) emitSecurityLog(logRow);
     return res.status(201).json(logRow || { message: 'Security event logged' });
   } catch (err) {
     console.error('Security log error:', err);
