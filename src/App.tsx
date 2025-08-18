@@ -79,6 +79,7 @@ function AppRoutes() {
       <Route element={<RoleProtectedLayout allowedRoles={['teacher']} />}>
         <Route path="/teacher" element={<TeacherDashboard />} />
         <Route path="/teacher/exams" element={<TeacherExams />} />
+        <Route path="/teacher/correction" element={<TeacherCorrection />} />
         <Route path="/teacher/correction/:examId" element={<TeacherCorrection />} />
         <Route path="/teacher/reports" element={<TeacherReports />} />
       </Route>
