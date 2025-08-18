@@ -21,7 +21,7 @@ import StudentExams from './pages/student/Exams';
 // TEACHER
 import TeacherDashboard from './pages/teacher/Dashboard';
 import TeacherExams from './pages/teacher/Exams';
-import TeacherCorrection from './pages/teacher/Correction';
+import TeacherCorrection from './pages/teacher/Correction'; // <-- garde le chemin que tu utilises
 import TeacherReports from './pages/teacher/Reports';
 
 // ADMIN
@@ -79,8 +79,12 @@ function AppRoutes() {
       <Route element={<RoleProtectedLayout allowedRoles={['teacher']} />}>
         <Route path="/teacher" element={<TeacherDashboard />} />
         <Route path="/teacher/exams" element={<TeacherExams />} />
+
+        {/* On garde la route sans param pour éviter 404, la page gère l'absence d'examId et propose d'aller aux examens */}
         <Route path="/teacher/correction" element={<TeacherCorrection />} />
+        {/* Route paramétrée (recommandée) */}
         <Route path="/teacher/correction/:examId" element={<TeacherCorrection />} />
+
         <Route path="/teacher/reports" element={<TeacherReports />} />
       </Route>
 

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, useLocation, Link, useNavigate } from 'react-router-dom';
 import { toast } from 'react-hot-toast';
 import { apiService } from '../../services/api';
 import {
@@ -34,11 +34,14 @@ type GradingPayload = {
 };
 
 export default function TeacherCorrection() {
-  // ⚠️ supporte à la fois /teacher/correction/:examId et /teacher/correction/:id
+  // Supporte /teacher/correction/:examId ET /teacher/correction?examId=...
   const { examId: examIdParam, id: idParam } = useParams<{ examId?: string; id?: string }>();
-  const examId = examIdParam || idParam;
+  const location = useLocation();
+  const navigate = useNavigate();
+  const qs = new URLSearchParams(location.search);
+  const examId = examIdParam || idParam || qs.get('examId') || undefined;
 
-  // Liste des copies à corriger pour cet examen
+  // Liste des copies à corriger pour l’examen
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(true);
 
@@ -49,11 +52,11 @@ export default function TeacherCorrection() {
   const [detailsBySession, setDetailsBySession] = useState<Record<string, GradingPayload>>({});
   const [loadingDetail, setLoadingDetail] = useState(false);
 
-  // Draft des notes/commentaires
+  // Draft notes/commentaires
   const [gradeDraft, setGradeDraft] = useState<Record<string, { score: number; comment: string }>>({});
   const [saving, setSaving] = useState(false);
 
-  // Charger la liste des sessions “submitted” pour l’examen
+  // Charge la liste des sessions “submitted” pour cet examen
   useEffect(() => {
     let mounted = true;
     const load = async () => {
@@ -67,15 +70,19 @@ export default function TeacherCorrection() {
           examId,
           status: 'submitted',
           page: 1,
-          pageSize: 100, // large par défaut
+          pageSize: 100,
         });
-
-        // Le service peut renvoyer soit un tableau direct, soit {items,total}
-        const items: SessionListItem[] = Array.isArray(resp)
-          ? resp
-          : (resp?.items ?? []);
-
+        // Supporte [] ou {items,total}
+        const items: SessionListItem[] = Array.isArray(resp) ? resp : (resp?.items ?? []);
         if (!mounted) return;
+
+        // Si aucune copie soumise -> message clair
+        if (!items.length) {
+          setSessions([]);
+          setIdx(0);
+          return;
+        }
+
         setSessions(items);
         setIdx(0);
       } catch (e: any) {
@@ -92,11 +99,10 @@ export default function TeacherCorrection() {
   const currentSession = sessions[idx];
   const currentSessionId = currentSession?.session_id;
 
-  // Charger le détail de la session sélectionnée
+  // Charge le détail d’une session
   useEffect(() => {
     let mounted = true;
 
-    // hydrater un draft depuis payload (questions) -> score/comment initial
     const hydrateDraft = (payload: GradingPayload) => {
       const initial: Record<string, { score: number; comment: string }> = {};
       (payload.questions || []).forEach(q => {
@@ -111,7 +117,7 @@ export default function TeacherCorrection() {
     const loadDetail = async () => {
       if (!currentSessionId) return;
 
-      // si déjà en cache -> juste hydrater le draft
+      // si déjà en cache
       if (detailsBySession[currentSessionId]) {
         hydrateDraft(detailsBySession[currentSessionId]);
         return;
@@ -139,7 +145,7 @@ export default function TeacherCorrection() {
   const payload = currentSessionId ? detailsBySession[currentSessionId] : undefined;
   const questions = payload?.questions ?? [];
 
-  // Totaux affichés (recalculés à partir du draft)
+  // Totaux
   const totals = useMemo(() => {
     const totalMax = questions.reduce((acc, q) => acc + (q.max_points || 0), 0);
     const totalAwarded = questions.reduce((acc, q) => {
@@ -160,7 +166,7 @@ export default function TeacherCorrection() {
     });
   }, [questions, gradeDraft]);
 
-  // Aides affichage compte réponses/notées (fallback si backend ne fournit pas answers_count/graded_count)
+  // Compteurs dérivés (fallback si backend ne renvoie pas answers_count / graded_count)
   const derivedCounts = useMemo(() => {
     const answersCount =
       currentSession?.answers_count ??
@@ -177,7 +183,8 @@ export default function TeacherCorrection() {
   }, [currentSession, questions, gradeDraft]);
 
   const setScore = (q: GradingQuestion, value: number) => {
-    const bounded = Math.min(Math.max(0, Number.isFinite(value) ? value : 0), q.max_points);
+    const num = Number.isFinite(value) ? value : 0;
+    const bounded = Math.min(Math.max(0, num), q.max_points);
     setGradeDraft(prev => ({
       ...prev,
       [q.question_id]: { score: bounded, comment: prev[q.question_id]?.comment ?? '' },
@@ -205,7 +212,7 @@ export default function TeacherCorrection() {
         })
       );
 
-      // refresh (synchroniser points_awarded/feedback après save)
+      // refresh (sync points_awarded/feedback après save)
       const refreshed: GradingPayload = await apiService.getGradingSession(currentSessionId);
       setDetailsBySession(prev => ({ ...prev, [currentSessionId]: refreshed }));
 
@@ -226,23 +233,21 @@ export default function TeacherCorrection() {
     }
     setSaving(true);
     try {
-      // veille à bien persister la dernière saisie
-      await saveAll();
+      await saveAll(); // s’assure que la dernière saisie est persistée
       await apiService.finalizeGrading(currentSessionId);
       toast.success('Copie finalisée ✅');
 
-      // Retirer cette copie de la liste
+      // Retirer cette copie de la liste et ajuster l’index
       setSessions(prev => {
         const next = prev.filter(s => s.session_id !== currentSessionId);
-        // corriger l’index courant
         const nextIdx = Math.min(idx, Math.max(0, next.length - 1));
         setIdx(nextIdx);
         return next;
       });
 
-      // nettoyer le cache de détails pour cette session
+      // Nettoyer le cache
       setDetailsBySession(prev => {
-        const { [currentSessionId]: _, ...rest } = prev;
+        const { [currentSessionId]: _drop, ...rest } = prev;
         return rest;
       });
     } catch (e: any) {
@@ -253,6 +258,7 @@ export default function TeacherCorrection() {
     }
   };
 
+  // États d’affichage
   if (loadingSessions) {
     return (
       <div className="py-20 flex items-center justify-center text-gray-600">
@@ -271,8 +277,15 @@ export default function TeacherCorrection() {
             ← Retour aux examens
           </Link>
         </div>
-        <div className="bg-white rounded-lg shadow p-8 text-center text-gray-600">
-          Identifiant d’examen manquant dans l’URL.
+        <div className="bg-white rounded-lg shadow p-8 text-center text-gray-600 space-y-4">
+          <div>Identifiant d’examen manquant dans l’URL.</div>
+          {/* Suggestion pratique : si quelqu’un arrive sur /teacher/correction par erreur */}
+          <button
+            onClick={() => navigate('/teacher/exams')}
+            className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700"
+          >
+            Ouvrir la liste des examens
+          </button>
         </div>
       </div>
     );
