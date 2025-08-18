@@ -1,4 +1,3 @@
-// src/pages/teacher/TeacherCorrection.tsx
 import React, { useEffect, useMemo, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { toast } from 'react-hot-toast';
@@ -14,8 +13,8 @@ type SessionListItem = {
   student_id: string;
   first_name: string;
   last_name: string;
-  answers_count: number;
-  graded_count: number;
+  answers_count?: number;
+  graded_count?: number;
   submitted_at: string | null;
 };
 
@@ -35,7 +34,9 @@ type GradingPayload = {
 };
 
 export default function TeacherCorrection() {
-  const { examId } = useParams<{ examId?: string }>();
+  // ⚠️ supporte à la fois /teacher/correction/:examId et /teacher/correction/:id
+  const { examId: examIdParam, id: idParam } = useParams<{ examId?: string; id?: string }>();
+  const examId = examIdParam || idParam;
 
   // Liste des copies à corriger pour cet examen
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
@@ -44,29 +45,41 @@ export default function TeacherCorrection() {
   // Index de la copie sélectionnée
   const [idx, setIdx] = useState(0);
 
-  // Détails d’une copie (lazy cache par sessionId)
+  // Détails d’une copie (cache par sessionId)
   const [detailsBySession, setDetailsBySession] = useState<Record<string, GradingPayload>>({});
   const [loadingDetail, setLoadingDetail] = useState(false);
 
-  // Draft des notes/commentaires en cours d’édition
+  // Draft des notes/commentaires
   const [gradeDraft, setGradeDraft] = useState<Record<string, { score: number; comment: string }>>({});
   const [saving, setSaving] = useState(false);
 
-  // Charger la liste des sessions à corriger pour l’examen
+  // Charger la liste des sessions “submitted” pour l’examen
   useEffect(() => {
     let mounted = true;
     const load = async () => {
-      if (!examId) return;
+      if (!examId) {
+        setLoadingSessions(false);
+        return;
+      }
       setLoadingSessions(true);
       try {
-        const list: SessionListItem[] = await apiService.getGradingSessions({
+        const resp = await apiService.getGradingSessions({
           examId,
           status: 'submitted',
+          page: 1,
+          pageSize: 100, // large par défaut
         });
+
+        // Le service peut renvoyer soit un tableau direct, soit {items,total}
+        const items: SessionListItem[] = Array.isArray(resp)
+          ? resp
+          : (resp?.items ?? []);
+
         if (!mounted) return;
-        setSessions(list);
+        setSessions(items);
         setIdx(0);
       } catch (e: any) {
+        console.error(e);
         toast.error(e?.message || 'Impossible de charger les copies.');
       } finally {
         if (mounted) setLoadingSessions(false);
@@ -79,48 +92,46 @@ export default function TeacherCorrection() {
   const currentSession = sessions[idx];
   const currentSessionId = currentSession?.session_id;
 
-  // Charger le détail de la session sélectionnée (questions/réponses/notes)
+  // Charger le détail de la session sélectionnée
   useEffect(() => {
     let mounted = true;
+
+    // hydrater un draft depuis payload (questions) -> score/comment initial
+    const hydrateDraft = (payload: GradingPayload) => {
+      const initial: Record<string, { score: number; comment: string }> = {};
+      (payload.questions || []).forEach(q => {
+        initial[q.question_id] = {
+          score: typeof q.points_awarded === 'number' ? q.points_awarded : 0,
+          comment: q.feedback ?? '',
+        };
+      });
+      setGradeDraft(initial);
+    };
+
     const loadDetail = async () => {
-      if (!currentSessionId || detailsBySession[currentSessionId]) {
-        // Si déjà en cache, hydrater le draft depuis le cache existant
-        if (currentSessionId && detailsBySession[currentSessionId]) {
-          const payload = detailsBySession[currentSessionId];
-          const initial: Record<string, { score: number; comment: string }> = {};
-          payload.questions.forEach(q => {
-            initial[q.question_id] = {
-              score: q.points_awarded ?? 0,
-              comment: q.feedback ?? '',
-            };
-          });
-          setGradeDraft(initial);
-        }
+      if (!currentSessionId) return;
+
+      // si déjà en cache -> juste hydrater le draft
+      if (detailsBySession[currentSessionId]) {
+        hydrateDraft(detailsBySession[currentSessionId]);
         return;
       }
+
       setLoadingDetail(true);
       try {
         const payload: GradingPayload = await apiService.getGradingSession(currentSessionId);
         if (!mounted) return;
 
-        // Cache detail
         setDetailsBySession(prev => ({ ...prev, [currentSessionId]: payload }));
-
-        // Init drafts
-        const initial: Record<string, { score: number; comment: string }> = {};
-        payload.questions.forEach(q => {
-          initial[q.question_id] = {
-            score: q.points_awarded ?? 0,
-            comment: q.feedback ?? '',
-          };
-        });
-        setGradeDraft(initial);
+        hydrateDraft(payload);
       } catch (e: any) {
+        console.error(e);
         toast.error(e?.message || 'Erreur chargement de la copie.');
       } finally {
         if (mounted) setLoadingDetail(false);
       }
     };
+
     loadDetail();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSessionId]);
@@ -128,6 +139,7 @@ export default function TeacherCorrection() {
   const payload = currentSessionId ? detailsBySession[currentSessionId] : undefined;
   const questions = payload?.questions ?? [];
 
+  // Totaux affichés (recalculés à partir du draft)
   const totals = useMemo(() => {
     const totalMax = questions.reduce((acc, q) => acc + (q.max_points || 0), 0);
     const totalAwarded = questions.reduce((acc, q) => {
@@ -138,16 +150,34 @@ export default function TeacherCorrection() {
     return { totalMax, totalAwarded };
   }, [questions, gradeDraft]);
 
+  // Tous notés ?
   const allScored = useMemo(() => {
     if (!questions.length) return false;
     return questions.every(q => {
       const d = gradeDraft[q.question_id];
-      return d && typeof d.score === 'number' && d.score >= 0;
+      const score = d?.score;
+      return typeof score === 'number' && score >= 0;
     });
   }, [questions, gradeDraft]);
 
+  // Aides affichage compte réponses/notées (fallback si backend ne fournit pas answers_count/graded_count)
+  const derivedCounts = useMemo(() => {
+    const answersCount =
+      currentSession?.answers_count ??
+      questions.filter(q => (q.answer_text && q.answer_text.trim() !== '') || q.selected_option).length;
+
+    const gradedCount =
+      currentSession?.graded_count ??
+      questions.filter(q => {
+        const d = gradeDraft[q.question_id];
+        return typeof (d?.score) === 'number' || typeof q.points_awarded === 'number';
+      }).length;
+
+    return { answersCount, gradedCount };
+  }, [currentSession, questions, gradeDraft]);
+
   const setScore = (q: GradingQuestion, value: number) => {
-    const bounded = Math.min(Math.max(0, value || 0), q.max_points);
+    const bounded = Math.min(Math.max(0, Number.isFinite(value) ? value : 0), q.max_points);
     setGradeDraft(prev => ({
       ...prev,
       [q.question_id]: { score: bounded, comment: prev[q.question_id]?.comment ?? '' },
@@ -162,7 +192,7 @@ export default function TeacherCorrection() {
   };
 
   const saveAll = async () => {
-    if (!currentSessionId) return;
+    if (!currentSessionId || !questions.length) return;
     setSaving(true);
     try {
       await Promise.all(
@@ -174,11 +204,14 @@ export default function TeacherCorrection() {
           });
         })
       );
-      toast.success('Notes enregistrées.');
-      // rafraîchir détail (pour refléter les points_awarded/feedback)
+
+      // refresh (synchroniser points_awarded/feedback après save)
       const refreshed: GradingPayload = await apiService.getGradingSession(currentSessionId);
       setDetailsBySession(prev => ({ ...prev, [currentSessionId]: refreshed }));
+
+      toast.success('Notes enregistrées.');
     } catch (e: any) {
+      console.error(e);
       toast.error(e?.message || 'Erreur enregistrement notes.');
     } finally {
       setSaving(false);
@@ -193,14 +226,27 @@ export default function TeacherCorrection() {
     }
     setSaving(true);
     try {
+      // veille à bien persister la dernière saisie
       await saveAll();
       await apiService.finalizeGrading(currentSessionId);
       toast.success('Copie finalisée ✅');
 
-      // Retirer cette copie de la liste “à corriger”
-      setSessions(prev => prev.filter(s => s.session_id !== currentSessionId));
-      setIdx(0);
+      // Retirer cette copie de la liste
+      setSessions(prev => {
+        const next = prev.filter(s => s.session_id !== currentSessionId);
+        // corriger l’index courant
+        const nextIdx = Math.min(idx, Math.max(0, next.length - 1));
+        setIdx(nextIdx);
+        return next;
+      });
+
+      // nettoyer le cache de détails pour cette session
+      setDetailsBySession(prev => {
+        const { [currentSessionId]: _, ...rest } = prev;
+        return rest;
+      });
     } catch (e: any) {
+      console.error(e);
       toast.error(e?.message || 'Impossible de finaliser.');
     } finally {
       setSaving(false);
@@ -212,6 +258,22 @@ export default function TeacherCorrection() {
       <div className="py-20 flex items-center justify-center text-gray-600">
         <Loader2 className="h-5 w-5 mr-2 animate-spin" />
         Chargement des copies…
+      </div>
+    );
+  }
+
+  if (!examId) {
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <h1 className="text-2xl font-bold text-gray-900">Correction des copies</h1>
+          <Link to="/teacher/exams" className="text-indigo-600 hover:text-indigo-500 font-medium">
+            ← Retour aux examens
+          </Link>
+        </div>
+        <div className="bg-white rounded-lg shadow p-8 text-center text-gray-600">
+          Identifiant d’examen manquant dans l’URL.
+        </div>
       </div>
     );
   }
@@ -244,18 +306,23 @@ export default function TeacherCorrection() {
               {payload?.session.exam_title || sessions[0]?.exam_title}
             </h1>
             <p className="text-sm text-gray-600">
-              Correction des copies — {idx + 1} / {sessions.length}
+              Correction des copies — {Math.min(idx + 1, sessions.length)} / {sessions.length}
             </p>
           </div>
 
-          <div className="flex items-center space-x-3">
-            <div className="text-sm text-gray-600">
-              <span className="font-medium">{studentName}</span>
+          <div className="flex items-center gap-4 text-sm text-gray-600">
+            <div>
+              Réponses : <span className="font-semibold">{derivedCounts.answersCount}</span>
             </div>
+            <div>
+              Notées : <span className="font-semibold">{derivedCounts.gradedCount}</span>
+            </div>
+
             <button
               onClick={saveAll}
               disabled={saving || !questions.length}
               className="flex items-center px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-60"
+              title="Sauvegarder les notes"
             >
               <Save className="h-4 w-4 mr-2" />
               Sauvegarder
@@ -264,6 +331,7 @@ export default function TeacherCorrection() {
               onClick={finalize}
               disabled={saving || !allScored || !questions.length}
               className="flex items-center px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 disabled:opacity-60"
+              title="Finaliser la copie"
             >
               <CheckCircle2 className="h-4 w-4 mr-2" />
               Finaliser
