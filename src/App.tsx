@@ -21,7 +21,8 @@ import StudentExams from './pages/student/Exams';
 // TEACHER
 import TeacherDashboard from './pages/teacher/Dashboard';
 import TeacherExams from './pages/teacher/Exams';
-import TeacherCorrection from './pages/teacher/Correction'; // <-- garde le chemin que tu utilises
+import TeacherCorrection from './pages/teacher/Correction';
+import TeacherCorrectionRedirect from './pages/teacher/CorrectionRedirect';
 import TeacherReports from './pages/teacher/Reports';
 
 // ADMIN
@@ -43,13 +44,8 @@ const RoleProtectedLayout: React.FC<{ allowedRoles: string[] }> = ({ allowedRole
     );
   }
 
-  if (!user) {
-    return <Navigate to="/login" replace />;
-  }
-
-  if (!allowedRoles.includes(user.role)) {
-    return <Navigate to="/unauthorized" replace />;
-  }
+  if (!user) return <Navigate to="/login" replace />;
+  if (!allowedRoles.includes(user.role)) return <Navigate to="/unauthorized" replace />;
 
   return <Layout><Outlet /></Layout>;
 };
@@ -80,9 +76,9 @@ function AppRoutes() {
         <Route path="/teacher" element={<TeacherDashboard />} />
         <Route path="/teacher/exams" element={<TeacherExams />} />
 
-        {/* On garde la route sans param pour éviter 404, la page gère l'absence d'examId et propose d'aller aux examens */}
-        <Route path="/teacher/correction" element={<TeacherCorrection />} />
-        {/* Route paramétrée (recommandée) */}
+        {/* 1) Route “secours” qui décide vers quel examen rediriger */}
+        <Route path="/teacher/correction" element={<TeacherCorrectionRedirect />} />
+        {/* 2) Route propre avec :examId */}
         <Route path="/teacher/correction/:examId" element={<TeacherCorrection />} />
 
         <Route path="/teacher/reports" element={<TeacherReports />} />

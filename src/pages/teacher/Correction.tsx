@@ -34,29 +34,24 @@ type GradingPayload = {
 };
 
 export default function TeacherCorrection() {
-  // Supporte /teacher/correction/:examId ET /teacher/correction?examId=...
-  const { examId: examIdParam, id: idParam } = useParams<{ examId?: string; id?: string }>();
+  const { examId: examIdParam } = useParams<{ examId?: string }>();
   const location = useLocation();
   const navigate = useNavigate();
-  const qs = new URLSearchParams(location.search);
-  const examId = examIdParam || idParam || qs.get('examId') || undefined;
 
-  // Liste des copies à corriger pour l’examen
+  // Support query-string en ultime secours
+  const qs = new URLSearchParams(location.search);
+  const examId = examIdParam || qs.get('examId') || undefined;
+
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(true);
-
-  // Index de la copie sélectionnée
   const [idx, setIdx] = useState(0);
 
-  // Détails d’une copie (cache par sessionId)
   const [detailsBySession, setDetailsBySession] = useState<Record<string, GradingPayload>>({});
   const [loadingDetail, setLoadingDetail] = useState(false);
 
-  // Draft notes/commentaires
   const [gradeDraft, setGradeDraft] = useState<Record<string, { score: number; comment: string }>>({});
   const [saving, setSaving] = useState(false);
 
-  // Charge la liste des sessions “submitted” pour cet examen
   useEffect(() => {
     let mounted = true;
     const load = async () => {
@@ -67,22 +62,10 @@ export default function TeacherCorrection() {
       setLoadingSessions(true);
       try {
         const resp = await apiService.getGradingSessions({
-          examId,
-          status: 'submitted',
-          page: 1,
-          pageSize: 100,
+          examId, status: 'submitted', page: 1, pageSize: 100
         });
-        // Supporte [] ou {items,total}
         const items: SessionListItem[] = Array.isArray(resp) ? resp : (resp?.items ?? []);
         if (!mounted) return;
-
-        // Si aucune copie soumise -> message clair
-        if (!items.length) {
-          setSessions([]);
-          setIdx(0);
-          return;
-        }
-
         setSessions(items);
         setIdx(0);
       } catch (e: any) {
@@ -99,10 +82,8 @@ export default function TeacherCorrection() {
   const currentSession = sessions[idx];
   const currentSessionId = currentSession?.session_id;
 
-  // Charge le détail d’une session
   useEffect(() => {
     let mounted = true;
-
     const hydrateDraft = (payload: GradingPayload) => {
       const initial: Record<string, { score: number; comment: string }> = {};
       (payload.questions || []).forEach(q => {
@@ -116,18 +97,14 @@ export default function TeacherCorrection() {
 
     const loadDetail = async () => {
       if (!currentSessionId) return;
-
-      // si déjà en cache
       if (detailsBySession[currentSessionId]) {
         hydrateDraft(detailsBySession[currentSessionId]);
         return;
       }
-
       setLoadingDetail(true);
       try {
         const payload: GradingPayload = await apiService.getGradingSession(currentSessionId);
         if (!mounted) return;
-
         setDetailsBySession(prev => ({ ...prev, [currentSessionId]: payload }));
         hydrateDraft(payload);
       } catch (e: any) {
@@ -145,7 +122,6 @@ export default function TeacherCorrection() {
   const payload = currentSessionId ? detailsBySession[currentSessionId] : undefined;
   const questions = payload?.questions ?? [];
 
-  // Totaux
   const totals = useMemo(() => {
     const totalMax = questions.reduce((acc, q) => acc + (q.max_points || 0), 0);
     const totalAwarded = questions.reduce((acc, q) => {
@@ -156,7 +132,6 @@ export default function TeacherCorrection() {
     return { totalMax, totalAwarded };
   }, [questions, gradeDraft]);
 
-  // Tous notés ?
   const allScored = useMemo(() => {
     if (!questions.length) return false;
     return questions.every(q => {
@@ -166,7 +141,6 @@ export default function TeacherCorrection() {
     });
   }, [questions, gradeDraft]);
 
-  // Compteurs dérivés (fallback si backend ne renvoie pas answers_count / graded_count)
   const derivedCounts = useMemo(() => {
     const answersCount =
       currentSession?.answers_count ??
@@ -211,11 +185,8 @@ export default function TeacherCorrection() {
           });
         })
       );
-
-      // refresh (sync points_awarded/feedback après save)
       const refreshed: GradingPayload = await apiService.getGradingSession(currentSessionId);
       setDetailsBySession(prev => ({ ...prev, [currentSessionId]: refreshed }));
-
       toast.success('Notes enregistrées.');
     } catch (e: any) {
       console.error(e);
@@ -233,11 +204,10 @@ export default function TeacherCorrection() {
     }
     setSaving(true);
     try {
-      await saveAll(); // s’assure que la dernière saisie est persistée
+      await saveAll();
       await apiService.finalizeGrading(currentSessionId);
       toast.success('Copie finalisée ✅');
 
-      // Retirer cette copie de la liste et ajuster l’index
       setSessions(prev => {
         const next = prev.filter(s => s.session_id !== currentSessionId);
         const nextIdx = Math.min(idx, Math.max(0, next.length - 1));
@@ -245,7 +215,6 @@ export default function TeacherCorrection() {
         return next;
       });
 
-      // Nettoyer le cache
       setDetailsBySession(prev => {
         const { [currentSessionId]: _drop, ...rest } = prev;
         return rest;
@@ -258,7 +227,6 @@ export default function TeacherCorrection() {
     }
   };
 
-  // États d’affichage
   if (loadingSessions) {
     return (
       <div className="py-20 flex items-center justify-center text-gray-600">
@@ -279,7 +247,6 @@ export default function TeacherCorrection() {
         </div>
         <div className="bg-white rounded-lg shadow p-8 text-center text-gray-600 space-y-4">
           <div>Identifiant d’examen manquant dans l’URL.</div>
-          {/* Suggestion pratique : si quelqu’un arrive sur /teacher/correction par erreur */}
           <button
             onClick={() => navigate('/teacher/exams')}
             className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700"
