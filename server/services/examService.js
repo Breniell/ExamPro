@@ -28,7 +28,6 @@ function normalizeQuestionType(raw) {
   if (['essay', 'essai', 'long_answer', 'long_text'].includes(t)) {
     return 'essay';
   }
-
   // fallback prudent : texte
   return 'text';
 }
@@ -41,7 +40,6 @@ function normalizeOptions(rawOptions, type) {
   let opts = rawOptions;
 
   if (typeof opts === 'string') {
-    // support "a, b, c" ou lignes multiples
     const parts = opts
       .split(/\r?\n|,/)
       .map(s => s.trim())
@@ -57,7 +55,6 @@ function normalizeOptions(rawOptions, type) {
   }
 
   if (opts && typeof opts === 'object') {
-    // on accepte un objet JSON (clé/valeur) si fourni
     return opts;
   }
 
@@ -67,10 +64,9 @@ function normalizeOptions(rawOptions, type) {
 async function listExamsForUser(user, { scope = 'available' } = {}) {
   let query, params = [];
   if (user.role === 'student') {
-    // Filtre temporel selon scope
     let timeFilter = `e.start_date <= now() AND e.end_date > now()`;
     if (scope === 'upcoming') timeFilter = `e.start_date > now()`;
-    if (scope === 'all')       timeFilter = `e.end_date > now()`; // tout ce qui n'est pas passé
+    if (scope === 'all')       timeFilter = `e.end_date > now()`;
 
     query = `
       SELECT e.*,
@@ -106,7 +102,6 @@ async function listExamsForUser(user, { scope = 'available' } = {}) {
   return rows;
 }
 
-
 async function getExamById(id, user) {
   const examRes = await pool.query(`
     SELECT e.*, u.first_name AS "teacherFirst", u.last_name AS "teacherLast"
@@ -118,15 +113,18 @@ async function getExamById(id, user) {
   if (user.role === 'student' && !['published','active'].includes(exam.status)) {
     throw { status: 403, message: 'Exam not available' };
   }
-  if (user.role === 'teacher' && exam.teacher_id !== req.user.id) {
+  // ✅ bugfix : utiliser "user.id" (et pas req.user.id)
+  if (user.role === 'teacher' && exam.teacher_id !== user.id) {
     throw { status: 403, message: 'Access denied' };
   }
 
+  // ✅ mapping "essay" -> "text" pour rester compatible FE (qcm | true_false | text)
   const qRes = await pool.query(`
     SELECT id,
            question_text AS "text",
            CASE
              WHEN question_type = 'multiple_choice' THEN 'qcm'
+             WHEN question_type = 'essay'           THEN 'text'
              ELSE question_type
            END AS "type",
            points      AS "points",
@@ -149,7 +147,7 @@ async function createExam(data, user) {
       title,
       description = null,
       duration_minutes,
-      start_date,        // string ISO (ex: 2025-01-20T14:00:00Z) ou date locale via <input type="datetime-local">
+      start_date,
       questions = []
     } = data;
 
@@ -157,14 +155,12 @@ async function createExam(data, user) {
       throw { status: 400, message: 'Missing required fields' };
     }
 
-    // Utiliser des Date pour avoir un encodage homogène côté driver pg
     const startDateObj = new Date(start_date);
     if (isNaN(startDateObj.getTime())) {
       throw { status: 400, message: 'Invalid start_date' };
     }
     const endDateObj = new Date(startDateObj.getTime() + Number(duration_minutes) * 60000);
 
-    // Cast explicite en timestamptz pour éviter les soucis de déduction (tz vs sans tz)
     const ex = await client.query(`
       INSERT INTO exams (title, description, teacher_id, duration_minutes, start_date, end_date)
       VALUES ($1,$2,$3,$4,$5::timestamptz,$6::timestamptz)

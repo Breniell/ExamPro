@@ -34,11 +34,17 @@ exports.grade = async (req, res, next) => {
     const teacherId = req.user.id;
     const { sessionId, questionId } = req.params;
     const { points_awarded, feedback } = req.body;
+
+    const n = Number(points_awarded);
+    if (!Number.isFinite(n) || n < 0) {
+      return res.status(400).json({ error: 'points_awarded must be a number >= 0' });
+    }
+
     const out = await gradeService.gradeQuestion({
       sessionId,
       questionId,
       teacherId,
-      pointsAwarded: Number(points_awarded),
+      pointsAwarded: n,
       feedback: feedback || null
     });
     res.json(out);
