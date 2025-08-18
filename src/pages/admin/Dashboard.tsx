@@ -1,12 +1,6 @@
 // src/pages/admin/Dashboard.tsx
-import React, { useEffect, useState } from 'react';
-import {
-  Users,
-  BookOpen,
-  AlertTriangle,
-  Camera as CameraIcon,
-  Shield,
-} from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { Users, BookOpen, AlertTriangle, Camera as CameraIcon, Shield } from 'lucide-react';
 import { AdminStatCard } from '../../components/admin/AdminStatCard';
 import { apiService } from '../../services/api';
 import { toast } from 'react-hot-toast';
@@ -15,6 +9,9 @@ import AdminChart from '../../components/admin/AdminChart';
 import { AdminQuickActions } from '../../components/admin/AdminQuickActions';
 import { AdminRecentAlerts } from '../../components/admin/AdminRecentAlerts';
 import { AdminSystemHealth } from '../../components/admin/AdminSystemHealth';
+import { connectProctorSocket } from '../../services/proctorSocket';
+
+type WsSession = { sessionId: string; students: number; admins: number; examTitle: string|null; studentName?: string|null };
 
 export default function AdminDashboard() {
   const [stats, setStats] = useState<any>({ totalUsers: 0, activeExams: 0, activeCameras: 0, securityAlerts: 0 });
@@ -23,38 +20,28 @@ export default function AdminDashboard() {
   const [health, setHealth] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
+  const socketRef = useRef<ReturnType<typeof connectProctorSocket> | null>(null);
+  const sessionsRef = useRef<Record<string, WsSession>>({});
+
   useEffect(() => {
-    const fetchDashboardData = async () => {
+    let mounted = true;
+
+    const loadHttp = async () => {
       try {
-        const [
-          userList,
-          examCountObj,
-          camCountObj,
-          secCountObj,
-          recentAlerts,
-          activeExams,
-          healthStatus,
-        ] = await Promise.all([
+        const [userList, alertsCountObj, recentAlerts, healthStatus, activeExamDetails] = await Promise.all([
           apiService.getUsers().catch(() => []),
-          apiService.getActiveExamsCount().catch(() => ({ count: 0 })),
-          apiService.getActiveCamerasCount().catch(() => ({ count: 0 })),
           apiService.getSecurityAlertsCount().catch(() => ({ count: 0 })),
-          apiService.getRecentAlerts().catch(() => []),
-          apiService.getActiveExamsDetails().catch(() => []),
+          apiService.getRecentAlerts(10).catch(() => []),
           apiService.getSystemHealth().catch(() => ({ status: 'UNKNOWN', timestamp: new Date().toISOString() })),
+          apiService.getActiveExamsDetails().catch(() => []),
         ]);
 
-        setStats({
-          totalUsers: Array.isArray(userList) ? userList.length : Number(userList?.count || 0),
-          activeExams: Number(examCountObj?.count || 0),
-          activeCameras: Number(camCountObj?.count || 0),
-          securityAlerts: Number(secCountObj?.count || 0),
-        });
-
+        const totalUsers = Array.isArray(userList) ? userList.length : Number(userList?.count || 0);
+        setStats((s: any) => ({ ...s, totalUsers, securityAlerts: Number(alertsCountObj?.count || 0) }));
         setAlerts(Array.isArray(recentAlerts) ? recentAlerts : []);
-        setExams(Array.isArray(activeExams) ? activeExams : []);
         setHealth(healthStatus || { status: 'UNKNOWN', timestamp: new Date().toISOString() });
-      } catch (err: any) {
+        setExams(Array.isArray(activeExamDetails) ? activeExamDetails : []);
+      } catch (err) {
         console.error(err);
         toast.error('Erreur lors du chargement du dashboard.');
       } finally {
@@ -62,7 +49,57 @@ export default function AdminDashboard() {
       }
     };
 
-    fetchDashboardData();
+    loadHttp();
+
+    // WS: recalcule en live activeCameras/activeExams
+    const token = localStorage.getItem('token') || '';
+    const sock = connectProctorSocket(token);
+    socketRef.current = sock;
+
+    const recompute = () => {
+      const list = Object.values(sessionsRef.current);
+      const actives = list.filter(s => (s.students || 0) > 0);
+      const activeCameras = actives.length;
+      const activeExams = new Set(actives.map(s => s.examTitle || s.sessionId)).size;
+      setStats((s: any) => ({ ...s, activeCameras, activeExams }));
+    };
+
+    sock.on('connect', () => sock.emit('list-sessions'));
+    sock.on('sessions-list', (list: WsSession[]) => {
+      sessionsRef.current = {};
+      (list || []).forEach(item => { sessionsRef.current[item.sessionId] = item; });
+      recompute();
+    });
+    sock.on('presence', (p: WsSession & { meta?: { examTitle?: string|null; studentName?: string|null } }) => {
+      const cur = sessionsRef.current[p.sessionId] || { sessionId: p.sessionId, students: 0, admins: 0, examTitle: null };
+      sessionsRef.current[p.sessionId] = {
+        ...cur,
+        students: p.students,
+        admins: p.admins,
+        examTitle: p.meta?.examTitle ?? cur.examTitle ?? null,
+        studentName: p.meta?.studentName ?? cur.studentName ?? null,
+      };
+      recompute();
+    });
+
+    const pollId = setInterval(async () => {
+      try {
+        const [alertsCountObj, recentAlerts, healthStatus] = await Promise.all([
+          apiService.getSecurityAlertsCount().catch(() => ({ count: stats.securityAlerts })),
+          apiService.getRecentAlerts(10).catch(() => alerts),
+          apiService.getSystemHealth().catch(() => health),
+        ]);
+        setStats((s: any) => ({ ...s, securityAlerts: Number(alertsCountObj?.count || s.securityAlerts) }));
+        setAlerts(Array.isArray(recentAlerts) ? recentAlerts : alerts);
+        setHealth(healthStatus || health);
+      } catch {}
+    }, 15000);
+
+    return () => {
+      clearInterval(pollId);
+      if (socketRef.current) { socketRef.current.disconnect(); socketRef.current = null; }
+      mounted = false;
+    };
   }, []);
 
   if (loading) {
@@ -83,7 +120,6 @@ export default function AdminDashboard() {
         </div>
       </div>
 
-      {/* Cartes statistiques */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
         <AdminStatCard title="Utilisateurs" icon={Users} count={stats.totalUsers} color="blue" />
         <AdminStatCard title="Examens Actifs" icon={BookOpen} count={stats.activeExams} color="green" />
@@ -91,19 +127,15 @@ export default function AdminDashboard() {
         <AdminStatCard title="Caméras Actives" icon={CameraIcon} count={stats.activeCameras} color="purple" />
       </div>
 
-      {/* Graphiques */}
       <AdminChart />
 
-      {/* Santé système + alertes récentes */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <AdminSystemHealth data={health} />
         <AdminRecentAlerts alerts={alerts} />
       </div>
 
-      {/* Examens actifs */}
       <AdminActiveExams exams={exams} />
 
-      {/* Actions rapides */}
       <AdminQuickActions />
     </div>
   );

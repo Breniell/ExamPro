@@ -1,6 +1,9 @@
 // src/controllers/sessionController.js
 const { validationResult } = require('express-validator');
 const sessionService = require('../services/sessionService');
+const { emitSecurityLog } = require('../socket/proctor'); // 👈 diffusion temps réel
+
+const VALID_SEVERITIES = new Set(['low', 'medium', 'high']);
 
 async function start(req, res) {
   const errors = validationResult(req);
@@ -53,6 +56,21 @@ async function answer(req, res) {
 async function submit(req, res) {
   try {
     const session = await sessionService.submitExam(req.params.id, req.user.id);
+
+    // 🔎 Log non-bloquant “exam_submitted” + diffusion live
+    try {
+      const logRow = await sessionService.logSecurityEvent({
+        sessionId: req.params.id,
+        eventType: 'exam_submitted',
+        eventData: { by: req.user.id },
+        severity: 'low',
+      });
+      if (logRow) emitSecurityLog(logRow);
+    } catch (e) {
+      // on n’échoue pas la soumission pour un log informatif
+      console.warn('submit() logSecurityEvent failed (non-blocking):', e?.message || e);
+    }
+
     res.json({ message: 'Exam submitted', session });
   } catch (err) {
     console.error('Submit exam error:', err);
@@ -64,14 +82,26 @@ async function logSecurity(req, res) {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
+  const { event_type, event_data, severity = 'low' } = req.body;
+
+  if (!VALID_SEVERITIES.has(severity)) {
+    return res.status(400).json({ error: 'Invalid severity (expected low|medium|high)' });
+  }
+
   try {
-    await sessionService.logSecurityEvent({
+    // 👉 IMPORTANT : on attend que le service RETOURNE la ligne insérée
+    const logRow = await sessionService.logSecurityEvent({
       sessionId: req.params.id,
-      eventType: req.body.event_type,
-      eventData: req.body.event_data,
-      severity: req.body.severity,
+      eventType: event_type,
+      eventData: event_data,
+      severity,
     });
-    res.json({ message: 'Security event logged' });
+
+    // Diffusion temps réel à tous les admins connectés
+    if (logRow) emitSecurityLog(logRow);
+
+    // On renvoie la ligne créée (meilleur DX côté FE)
+    return res.status(201).json(logRow || { message: 'Security event logged' });
   } catch (err) {
     console.error('Security log error:', err);
     res.status(500).json({ error: 'Internal server error' });

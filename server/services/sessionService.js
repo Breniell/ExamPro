@@ -101,11 +101,14 @@ async function submitExam(sessionId, studentId) {
   return rows[0];
 }
 
-async function logSecurityEvent({ sessionId, eventType, eventData, severity }) {
-  await pool.query(`
-    INSERT INTO security_logs (session_id, event_type, event_data, severity, created_at)
-    VALUES ($1,$2,$3,$4, now())
-  `, [sessionId, eventType, JSON.stringify(eventData), severity || 'medium']);
+async function logSecurityEvent({ sessionId, eventType, eventData, severity = 'low' }) {
+  const { rows } = await pool.query(
+    `INSERT INTO security_logs (session_id, event_type, event_data, severity, resolved)
+     VALUES ($1,$2,$3,$4,false)
+     RETURNING id, session_id, event_type, event_data, severity, resolved, created_at`,
+    [sessionId, eventType, eventData, severity]
+  );
+  return rows[0]; // ✅ indispensable pour l’émission live & la réponse HTTP
 }
 
 module.exports = {

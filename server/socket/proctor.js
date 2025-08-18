@@ -2,13 +2,14 @@
 const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
 
-// --- État module (réutilisable par les routes HTTP) ---
+// --- État module ---
 let ioRef = null;
 // sessionId -> { students:Set<socketId>, admins:Set<socketId>, meta?:{examTitle?:string, studentName?:string} }
 const rooms = new Map();
+// Suivre quel socket étudiant appartient à quelle session
+const studentToSession = new Map();
 
 function getProctorSnapshot() {
-  // retourne une vue consolidée pour les routes HTTP
   const list = Array.from(rooms.entries()).map(([sessionId, r]) => ({
     sessionId,
     students: r.students.size,
@@ -23,7 +24,7 @@ function authFromHandshake(socket) {
   const token = socket.handshake.auth?.token || socket.handshake.query?.token;
   if (!token) throw new Error('Missing token');
   const payload = jwt.verify(token, process.env.JWT_SECRET);
-  return payload; // { id, role, ... } ou { userId, role, ... }
+  return payload; // { id/userId, role, ... }
 }
 
 function ensureRoom(sessionId) {
@@ -35,28 +36,38 @@ function ensureRoom(sessionId) {
   return r;
 }
 
+function broadcastPresence(nsp, sessionId, r) {
+  nsp.to(`sess:${sessionId}`).emit('presence', {
+    sessionId,
+    students: r.students.size,
+    admins: r.admins.size,
+    meta: r.meta || {},
+  });
+}
+
 function leaveAll(socket, nsp) {
+  const sid = socket.id;
+  // si c'était un étudiant, connaître la session
+  const wasInSession = studentToSession.get(sid);
+
   for (const [sessionId, r] of rooms) {
     const before = { s: r.students.size, a: r.admins.size };
-    r.students.delete(socket.id);
-    r.admins.delete(socket.id);
+    r.students.delete(sid);
+    r.admins.delete(sid);
     const after = { s: r.students.size, a: r.admins.size };
 
-    // notifier si changement
     if (before.s !== after.s || before.a !== after.a) {
-      nsp.to(`sess:${sessionId}`).emit('presence', {
-        sessionId,
-        students: r.students.size,
-        admins: r.admins.size,
-        meta: r.meta || {},
-      });
-      if (!r.students.size) {
-        // avertir les admins que la session n’a plus d’étudiants
-        nsp.emit('session-left', { sessionId });
-      }
+      broadcastPresence(nsp, sessionId, r);
     }
+    if (!r.students.size && !r.admins.size) {
+      rooms.delete(sessionId);
+    }
+  }
 
-    if (!r.students.size && !r.admins.size) rooms.delete(sessionId);
+  // notifier toujours un départ étudiant (plus parlant côté admin)
+  if (wasInSession) {
+    studentToSession.delete(sid);
+    nsp.emit('session-left', { sessionId: wasInSession, socketId: sid });
   }
 }
 
@@ -85,33 +96,29 @@ function initProctoring(server) {
   });
 
   nsp.on('connection', (socket) => {
-    // { sessionId }
     socket.on('join-session', ({ sessionId }) => {
       if (!sessionId) return;
       const role = socket.user?.role;
       const r = ensureRoom(sessionId);
 
-      if (role === 'admin') r.admins.add(socket.id);
-      else r.students.add(socket.id);
+      if (role === 'admin') {
+        r.admins.add(socket.id);
+      } else {
+        r.students.add(socket.id);
+        studentToSession.set(socket.id, sessionId);
+      }
 
       socket.join(`sess:${sessionId}`);
-
-      // présence
-      nsp.to(`sess:${sessionId}`).emit('presence', {
-        sessionId,
-        students: r.students.size,
-        admins: r.admins.size,
-        meta: r.meta || {},
-      });
+      broadcastPresence(nsp, sessionId, r);
     });
 
-    // métadonnées publiées par les étudiants (et relayées aux admins)
+    // métadonnées publiées par les étudiants
     socket.on('session-meta', ({ sessionId, examTitle, studentName }) => {
       if (!sessionId) return;
       const r = ensureRoom(sessionId);
       r.meta = { ...(r.meta || {}), ...(examTitle ? { examTitle } : {}), ...(studentName ? { studentName } : {}) };
 
-      // notifier tout le monde (les admins écoutent ça pour enrichir la grille)
+      // notifier tout le monde (les admins enrichissent leur grille)
       nsp.emit('session-meta', {
         sessionId,
         examTitle: r.meta.examTitle || null,
@@ -119,12 +126,7 @@ function initProctoring(server) {
         socketId: socket.id,
       });
 
-      nsp.to(`sess:${sessionId}`).emit('presence', {
-        sessionId,
-        students: r.students.size,
-        admins: r.admins.size,
-        meta: r.meta || {},
-      });
+      broadcastPresence(nsp, sessionId, r);
     });
 
     // ADMIN: liste des sessions actives
@@ -135,6 +137,7 @@ function initProctoring(server) {
         students: r.students.size,
         admins: r.admins.size,
         examTitle: r.meta?.examTitle || null,
+        studentName: r.meta?.studentName || null,
       }));
       socket.emit('sessions-list', list);
     });
@@ -154,12 +157,10 @@ function initProctoring(server) {
       if (!to || !description) return;
       nsp.to(to).emit('webrtc-offer', { from: socket.id, sessionId, description });
     });
-
     socket.on('webrtc-answer', ({ to, sessionId, description }) => {
       if (!to || !description) return;
       nsp.to(to).emit('webrtc-answer', { from: socket.id, sessionId, description });
     });
-
     socket.on('webrtc-ice-candidate', ({ to, candidate, sessionId }) => {
       if (!to || !candidate) return;
       nsp.to(to).emit('webrtc-ice-candidate', { from: socket.id, candidate, sessionId });
@@ -173,4 +174,19 @@ function initProctoring(server) {
   return io;
 }
 
-module.exports = { initProctoring, getProctorSnapshot };
+function emitSecurityLog(logRow) {
+  if (!ioRef) return;
+  ioRef.of('/proctor').emit('security-log', logRow);
+}
+
+function emitSecurityLogResolved(payload /* { id, resolved: true } ou log complet */) {
+  if (!ioRef) return;
+  ioRef.of('/proctor').emit('security-log-resolved', payload);
+}
+
+module.exports = {
+  initProctoring,
+  getProctorSnapshot,
+  emitSecurityLog,           // <--- nouveau
+  emitSecurityLogResolved,   // <--- nouveau
+};

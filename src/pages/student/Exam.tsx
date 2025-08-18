@@ -3,7 +3,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { toast } from 'react-hot-toast';
 import { apiService } from '../../services/api';
-import { Clock, Camera, AlertTriangle, Send, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Clock, Camera, AlertTriangle, Send, ChevronLeft, ChevronRight, Mic, MicOff, MonitorUp, MonitorX } from 'lucide-react';
 import { connectProctorSocket, iceServers } from '../../services/proctorSocket';
 
 type ExamQuestion = {
@@ -46,11 +46,18 @@ export default function StudentExam() {
   const [cameraActive, setCameraActive] = useState(false);
   const [focusWarnings, setFocusWarnings] = useState(0);
 
+  // Nouveaux états proctoring
+  const [audioEnabled, setAudioEnabled] = useState(false);
+  const [screenActive, setScreenActive] = useState(false);
+
   // PROCTORING
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const mediaStream = useRef<MediaStream | null>(null);
+  const camStream = useRef<MediaStream | null>(null);
+  const screenTrack = useRef<MediaStreamTrack | null>(null);
+  const audioTrack = useRef<MediaStreamTrack | null>(null);
+
   const socketRef = useRef<ReturnType<typeof connectProctorSocket> | null>(null);
-  const peers = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const peers = useRef<Map<string, RTCPeerConnection>>(new Map()); // adminSocketId -> pc
 
   // time-spent par question
   const timeSpent = useRef<Record<string, number>>({});
@@ -65,14 +72,15 @@ export default function StudentExam() {
       if (!examId) return;
       setLoading(true);
       try {
-        // 0) PROCTORING: permission caméra obligatoire
+        // 0) Caméra obligatoire (audio off au départ)
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-          stream.getVideoTracks().forEach(t => {
-            t.onended = () => setCameraActive(false);
-          });
-          mediaStream.current = stream;
+          camStream.current = stream;
           setCameraActive(true);
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+            videoRef.current.play().catch(() => {});
+          }
         } catch {
           toast.error('La webcam est requise pour passer cet examen.');
           navigate('/student', { replace: true });
@@ -102,12 +110,7 @@ export default function StudentExam() {
         };
         setSession(sess);
 
-        // 4) PROCTORING: preview locale + Socket join + meta
-        if (videoRef.current && mediaStream.current) {
-          videoRef.current.srcObject = mediaStream.current;
-          videoRef.current.play().catch(() => {});
-        }
-
+        // 4) Socket
         const token = localStorage.getItem('token') || '';
         const me = await apiService.getCurrentUser().catch(() => null as any);
         const studentName =
@@ -121,7 +124,6 @@ export default function StudentExam() {
         sock.on('connect', () => {
           if (det?.id) {
             sock.emit('join-session', { sessionId: det.id });
-            // Publier des métadonnées utiles au centre de contrôle admin
             sock.emit('session-meta', {
               sessionId: det.id,
               examTitle: ex?.title || null,
@@ -130,17 +132,15 @@ export default function StudentExam() {
           }
         });
 
-        sock.on('connect_error', () => {
-          toast.error('Connexion au centre de contrôle indisponible (WS).');
-        });
+        sock.on('connect_error', () => toast.error('Connexion au centre de contrôle indisponible (WS).'));
 
-        // L’admin demande une offre: on prépare une connexion et on envoie l’offer
+        // L’admin demande une offre
         sock.on('request-offer', async ({ adminSocketId, sessionId }) => {
           if (!sess?.id || sessionId !== sess.id) return;
           await createAndSendOffer(adminSocketId);
         });
 
-        // Réception de la réponse d’un admin
+        // Réponse admin
         sock.on('webrtc-answer', async ({ from, description }) => {
           const pc = peers.current.get(from);
           if (pc && description) {
@@ -152,35 +152,25 @@ export default function StudentExam() {
         sock.on('webrtc-ice-candidate', async ({ from, candidate }) => {
           const pc = peers.current.get(from);
           if (pc && candidate) {
-            try {
-              await pc.addIceCandidate(new RTCIceCandidate(candidate));
-            } catch {}
+            try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch {}
           }
         });
 
-        // Calcul timer: deadline (durée vs end_date)
+        // Timer
         const startMs = new Date(sess.started_at).getTime();
         const endByDuration = startMs + sess.duration_minutes * 60_000;
         const hardEnd = new Date(sess.end_date).getTime();
         const deadline = Math.min(endByDuration, isFinite(hardEnd) ? hardEnd : endByDuration);
         setTimeLeft(Math.max(0, Math.floor((deadline - Date.now()) / 1000)));
 
-        // Warn si fermeture onglet
+        // Warn close
         const beforeUnload = (e: BeforeUnloadEvent) => {
-          if (!submittedRef.current) {
-            e.preventDefault();
-            e.returnValue = '';
-          }
+          if (!submittedRef.current) { e.preventDefault(); e.returnValue = ''; }
         };
         window.addEventListener('beforeunload', beforeUnload);
-
-        // entrée dans la 1ère question
         enterAt.current = Date.now();
 
-        // cleanup partiel (listeners window)
-        return () => {
-          window.removeEventListener('beforeunload', beforeUnload);
-        };
+        return () => { window.removeEventListener('beforeunload', beforeUnload); };
       } catch (e: any) {
         console.error(e);
         toast.error(e?.message || "Impossible d'ouvrir l'examen.");
@@ -190,52 +180,43 @@ export default function StudentExam() {
       }
     };
     boot();
-    return () => {
-      mounted = false;
-      cleanupProctoring();
-    };
+    return () => { mounted = false; cleanupProctoring(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [examId]);
 
   function cleanupProctoring() {
-    // close peers
-    for (const pc of peers.current.values()) {
-      try { pc.close(); } catch {}
-    }
+    for (const pc of peers.current.values()) { try { pc.close(); } catch {} }
     peers.current.clear();
-    // stop stream
-    mediaStream.current?.getTracks().forEach((t) => t.stop());
-    mediaStream.current = null;
-    // socket
-    if (socketRef.current) {
-      socketRef.current.disconnect();
-      socketRef.current = null;
-    }
+    camStream.current?.getTracks().forEach(t => t.stop());
+    camStream.current = null;
+    if (screenTrack.current) { try { screenTrack.current.stop(); } catch {} screenTrack.current = null; }
+    if (audioTrack.current) { try { audioTrack.current.stop(); } catch {} audioTrack.current = null; }
+    if (socketRef.current) { socketRef.current.disconnect(); socketRef.current = null; }
+  }
+
+  function activeVideoTrack(): MediaStreamTrack | null {
+    if (screenActive && screenTrack.current) return screenTrack.current;
+    const vt = camStream.current?.getVideoTracks?.()[0] || null;
+    return vt || null;
   }
 
   async function createAndSendOffer(adminSocketId: string) {
-    if (!mediaStream.current || !socketRef.current) return;
+    if (!socketRef.current) return;
     const pc = new RTCPeerConnection({ iceServers: iceServers() });
     peers.current.set(adminSocketId, pc);
 
-    // ajouter pistes (vidéo seule)
-    mediaStream.current
-      .getTracks()
-      .forEach((track) => pc.addTrack(track, mediaStream.current as MediaStream));
+    // Ajout pistes (vidéo active + audio si dispo)
+    const vTrack = activeVideoTrack();
+    if (vTrack) pc.addTrack(vTrack, new MediaStream([vTrack]));
+    if (audioTrack.current) pc.addTrack(audioTrack.current, new MediaStream([audioTrack.current]));
 
     pc.onicecandidate = (ev) => {
       if (ev.candidate) {
-        socketRef.current?.emit('webrtc-ice-candidate', {
-          to: adminSocketId,
-          candidate: ev.candidate,
-        });
+        socketRef.current?.emit('webrtc-ice-candidate', { to: adminSocketId, candidate: ev.candidate });
       }
     };
 
-    const offer = await pc.createOffer({
-      offerToReceiveAudio: false,
-      offerToReceiveVideo: false,
-    });
+    const offer = await pc.createOffer({ offerToReceiveAudio: false, offerToReceiveVideo: false });
     await pc.setLocalDescription(offer);
 
     socketRef.current.emit('webrtc-offer', {
@@ -243,6 +224,18 @@ export default function StudentExam() {
       sessionId: session?.id,
       description: pc.localDescription,
     });
+  }
+
+  // Mise à jour dynamique des pistes vidéo (camera <-> screen)
+  async function replaceVideoForAllPeers(newTrack: MediaStreamTrack | null) {
+    for (const pc of peers.current.values()) {
+      const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+      if (sender) {
+        await sender.replaceTrack(newTrack);
+      } else if (newTrack) {
+        pc.addTrack(newTrack, new MediaStream([newTrack]));
+      }
+    }
   }
 
   // Timer tick
@@ -268,13 +261,9 @@ export default function StudentExam() {
       if (!session?.id) return;
       if (document.hidden) {
         setFocusWarnings((v) => v + 1);
-        apiService
-          .logSecurityEvent(session.id, {
-            event_type: 'tab_blur',
-            event_data: 'User left the tab/window',
-            severity: 'low',
-          })
-          .catch(() => {});
+        apiService.logSecurityEvent(session.id, {
+          event_type: 'tab_blur', event_data: 'User left the tab/window', severity: 'low',
+        }).catch(() => {});
       }
     };
     document.addEventListener('visibilitychange', onVis);
@@ -284,18 +273,13 @@ export default function StudentExam() {
   // Anti-triche (raccourcis & clic droit)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && ['c', 'v', 'a', 's'].includes(e.key.toLowerCase()))
-        e.preventDefault();
-      if (e.key === 'F12' || (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'i'))
-        e.preventDefault();
+      if ((e.ctrlKey || e.metaKey) && ['c', 'v', 'a', 's'].includes(e.key.toLowerCase())) e.preventDefault();
+      if (e.key === 'F12' || (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'i')) e.preventDefault();
     };
     const onCtx = (e: MouseEvent) => e.preventDefault();
     document.addEventListener('keydown', onKey);
     document.addEventListener('contextmenu', onCtx);
-    return () => {
-      document.removeEventListener('keydown', onKey);
-      document.removeEventListener('contextmenu', onCtx);
-    };
+    return () => { document.removeEventListener('keydown', onKey); document.removeEventListener('contextmenu', onCtx); };
   }, []);
 
   const list = exam?.questions ?? [];
@@ -308,40 +292,24 @@ export default function StudentExam() {
     enterAt.current = Date.now();
   };
 
-  const goPrev = () => {
-    if (currentIdx === 0) return;
-    leaveCurrentQuestion();
-    setCurrentIdx((i) => i - 1);
-  };
-  const goNext = () => {
-    if (currentIdx >= list.length - 1) return;
-    leaveCurrentQuestion();
-    setCurrentIdx((i) => i + 1);
-  };
+  const goPrev = () => { if (currentIdx === 0) return; leaveCurrentQuestion(); setCurrentIdx((i) => i - 1); };
+  const goNext = () => { if (currentIdx >= list.length - 1) return; leaveCurrentQuestion(); setCurrentIdx((i) => i + 1); };
 
-  const setAnswer = (questionId: string, value: string) => {
-    setAnswers((prev) => ({ ...prev, [questionId]: value }));
-  };
+  const setAnswer = (questionId: string, value: string) => { setAnswers((prev) => ({ ...prev, [questionId]: value })); };
 
   const formatTime = (s: number) => {
-    const h = Math.floor(s / 3600);
-    const m = Math.floor((s % 3600) / 60);
-    const sec = s % 60;
-    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(
-      2,
-      '0'
-    )}`;
+    const h = Math.floor(s / 3600); const m = Math.floor((s % 3600) / 60); const sec = s % 60;
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
   };
 
   const handleSubmit = async () => {
     if (!session?.id || !exam) return;
-    if (submittedRef.current) return; // garde-fou
+    if (submittedRef.current) return;
     submittedRef.current = true;
     setIsSubmitting(true);
     try {
       leaveCurrentQuestion();
 
-      // soumission de toutes les réponses (en parallèle)
       await Promise.all(
         exam.questions.map(async (qq) => {
           const val = answers[qq.id] ?? '';
@@ -350,11 +318,9 @@ export default function StudentExam() {
             time_spent: Math.max(0, Math.floor(timeSpent.current[qq.id] || 0)),
           };
           if (qq.type === 'qcm' || qq.type === 'true_false') {
-            payload.selected_option = val || null;
-            payload.answer_text = null;
+            payload.selected_option = val || null; payload.answer_text = null;
           } else {
-            payload.answer_text = val || '';
-            payload.selected_option = null;
+            payload.answer_text = val || ''; payload.selected_option = null;
           }
           return apiService.submitAnswer(session.id, payload);
         })
@@ -366,7 +332,7 @@ export default function StudentExam() {
     } catch (e: any) {
       console.error(e);
       toast.error(e?.message || 'Soumission impossible.');
-      submittedRef.current = false; // autorise un retry manuel
+      submittedRef.current = false; // autorise retry manuel
     } finally {
       setIsSubmitting(false);
       cleanupProctoring();
@@ -378,30 +344,71 @@ export default function StudentExam() {
     [currentIdx, list.length]
   );
 
-  if (loading || !exam || !session || !q) {
-    return (
-      <div className="min-h-[50vh] grid place-items-center text-gray-600">
-        Chargement de l’examen…
-      </div>
-    );
+  // --- Contrôles proctoring: audio + screen share
+  async function toggleAudio() {
+    try {
+      if (!audioEnabled) {
+        const a = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        const track = a.getAudioTracks()[0];
+        audioTrack.current = track;
+        setAudioEnabled(true);
+        // injecter sur les PCs existants
+        for (const pc of peers.current.values()) {
+          pc.addTrack(track, new MediaStream([track]));
+        }
+        // rattacher aussi localement
+        if (camStream.current) camStream.current.addTrack(track);
+      } else {
+        setAudioEnabled(false);
+        if (audioTrack.current) {
+          // mute sans renégociation
+          audioTrack.current.enabled = false;
+        }
+      }
+    } catch {
+      toast.error("Micro non disponible.");
+    }
+  }
+
+  async function startScreenShare() {
+    try {
+      // getDisplayMedia donne une vidéo
+      const disp = await (navigator.mediaDevices as any).getDisplayMedia({ video: true, audio: false });
+      const track: MediaStreamTrack = disp.getVideoTracks()[0];
+      screenTrack.current = track;
+      setScreenActive(true);
+      // Remplacer la piste vidéo envoyée vers tous les PCs
+      await replaceVideoForAllPeers(track);
+      // preview locale = on montre toujours la caméra à l’étudiant (plus naturel)
+      track.onended = async () => { await stopScreenShare(); };
+      toast.success("Partage d'écran activé (visible côté examinateur).");
+    } catch {
+      toast.error("Partage d'écran refusé.");
+    }
+  }
+
+  async function stopScreenShare() {
+    setScreenActive(false);
+    if (screenTrack.current) {
+      try { screenTrack.current.stop(); } catch {}
+      screenTrack.current = null;
+    }
+    const vt = camStream.current?.getVideoTracks?.()[0] || null;
+    await replaceVideoForAllPeers(vt);
+    toast('Retour caméra.');
   }
 
   const renderAnswer = () => {
+    if (!q) return null;
     if (q.type === 'qcm') {
       const opts = Array.isArray(q.options) ? q.options : [];
       return (
         <div className="space-y-3">
           {opts.map((opt, i) => (
-            <label
-              key={i}
-              className="flex items-center p-3 border border-gray-200 rounded-lg hover:bg-gray-50 cursor-pointer"
-            >
+            <label key={i} className="flex items-center p-3 border border-gray-200 rounded-lg hover:bg-gray-50 cursor-pointer">
               <input
-                type="radio"
-                name={`q-${q.id}`}
-                value={opt}
-                checked={answers[q.id] === opt}
-                onChange={(e) => setAnswer(q.id, e.target.value)}
+                type="radio" name={`q-${q.id}`} value={opt}
+                checked={answers[q.id] === opt} onChange={(e) => setAnswer(q.id, e.target.value)}
                 className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300"
               />
               <span className="ml-3 text-gray-700">{opt}</span>
@@ -415,16 +422,10 @@ export default function StudentExam() {
       return (
         <div className="space-y-3">
           {tf.map((opt) => (
-            <label
-              key={opt}
-              className="flex items-center p-3 border border-gray-200 rounded-lg hover:bg-gray-50 cursor-pointer"
-            >
+            <label key={opt} className="flex items-center p-3 border border-gray-200 rounded-lg hover:bg-gray-50 cursor-pointer">
               <input
-                type="radio"
-                name={`q-${q.id}`}
-                value={opt}
-                checked={answers[q.id] === opt}
-                onChange={(e) => setAnswer(q.id, e.target.value)}
+                type="radio" name={`q-${q.id}`} value={opt}
+                checked={answers[q.id] === opt} onChange={(e) => setAnswer(q.id, e.target.value)}
                 className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300"
               />
               <span className="ml-3 text-gray-700">{opt}</span>
@@ -435,14 +436,16 @@ export default function StudentExam() {
     }
     return (
       <textarea
-        value={answers[q.id] || ''}
-        onChange={(e) => setAnswer(q.id, e.target.value)}
-        placeholder="Saisissez votre réponse ici…"
-        rows={10}
+        value={answers[q.id] || ''} onChange={(e) => setAnswer(q.id, e.target.value)}
+        placeholder="Saisissez votre réponse ici…" rows={10}
         className="w-full p-4 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 resize-none"
       />
     );
   };
+
+  if (loading || !exam || !session || !q) {
+    return <div className="min-h-[50vh] grid place-items-center text-gray-600">Chargement de l’examen…</div>;
+  }
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -459,26 +462,37 @@ export default function StudentExam() {
             <div className="flex items-center space-x-6">
               <div className="flex items-center space-x-2">
                 <Camera className={`h-5 w-5 ${cameraActive ? 'text-green-600' : 'text-red-600'}`} />
-                <span
-                  className={`text-sm font-medium ${
-                    cameraActive ? 'text-green-600' : 'text-red-600'
-                  }`}
-                >
+                <span className={`text-sm font-medium ${cameraActive ? 'text-green-600' : 'text-red-600'}`}>
                   {cameraActive ? 'Caméra active' : 'Caméra inactive'}
                 </span>
               </div>
+
+              <button
+                onClick={audioEnabled ? toggleAudio : toggleAudio}
+                className={`inline-flex items-center gap-2 px-3 py-1 rounded-md ${audioEnabled ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-700'}`}
+                title={audioEnabled ? 'Couper le micro' : 'Activer le micro'}
+              >
+                {audioEnabled ? <Mic className="h-4 w-4" /> : <MicOff className="h-4 w-4" />}
+                {audioEnabled ? 'Micro ON' : 'Micro OFF'}
+              </button>
+
+              <button
+                onClick={screenActive ? stopScreenShare : startScreenShare}
+                className={`inline-flex items-center gap-2 px-3 py-1 rounded-md ${screenActive ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-700'}`}
+                title={screenActive ? "Arrêter le partage d'écran" : "Partager l'écran"}
+              >
+                {screenActive ? <MonitorX className="h-4 w-4" /> : <MonitorUp className="h-4 w-4" />}
+                {screenActive ? 'Stop partage' : "Partager l'écran"}
+              </button>
+
               <div className="flex items-center space-x-2">
                 <Clock className="h-5 w-5 text-orange-600" />
-                <span className="text-lg font-mono font-bold text-orange-600">
-                  {formatTime(timeLeft)}
-                </span>
+                <span className="text-lg font-mono font-bold text-orange-600">{formatTime(timeLeft)}</span>
               </div>
               {focusWarnings > 0 && (
                 <div className="flex items-center space-x-2">
                   <AlertTriangle className="h-5 w-5 text-red-600" />
-                  <span className="text-sm font-medium text-red-600">
-                    Alertes: {focusWarnings}
-                  </span>
+                  <span className="text-sm font-medium text-red-600">Alertes: {focusWarnings}</span>
                 </div>
               )}
             </div>
@@ -487,16 +501,11 @@ export default function StudentExam() {
           {/* progress */}
           <div className="pb-4">
             <div className="flex items-center justify-between text-sm text-gray-600 mb-2">
-              <span>
-                Question {currentIdx + 1} sur {list.length}
-              </span>
+              <span>Question {currentIdx + 1} sur {list.length}</span>
               <span>{Math.round(progress)}% terminé</span>
             </div>
             <div className="w-full bg-gray-200 rounded-full h-2">
-              <div
-                className="bg-indigo-600 h-2 rounded-full transition-all duration-300"
-                style={{ width: `${progress}%` }}
-              />
+              <div className="bg-indigo-600 h-2 rounded-full transition-all duration-300" style={{ width: `${progress}%` }} />
             </div>
           </div>
         </div>
@@ -509,30 +518,22 @@ export default function StudentExam() {
           <div className="bg-white rounded-lg shadow-lg p-6">
             <div className="mb-4">
               <div className="flex items-center justify-between mb-2">
-                <h2 className="text-lg font-semibold text-gray-900">
-                  Question {currentIdx + 1}
-                </h2>
-                <span className="px-2 py-1 bg-blue-100 text-blue-800 text-sm font-medium rounded">
-                  {q.points} points
-                </span>
+                <h2 className="text-lg font-semibold text-gray-900">Question {currentIdx + 1}</h2>
+                <span className="px-2 py-1 bg-blue-100 text-blue-800 text-sm font-medium rounded">{q.points} points</span>
               </div>
               <p className="text-gray-700 text-lg leading-relaxed">{q.text}</p>
             </div>
 
             <div className="flex items-center justify-between pt-6 border-t border-gray-200">
               <button
-                onClick={goPrev}
-                disabled={currentIdx === 0}
+                onClick={goPrev} disabled={currentIdx === 0}
                 className="flex items-center px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 rounded-md hover:bg-gray-200 disabled:opacity-50"
               >
                 <ChevronLeft className="h-4 w-4 mr-1" /> Précédent
               </button>
-              <span className="text-sm text-gray-500">
-                {currentIdx + 1} / {list.length}
-              </span>
+              <span className="text-sm text-gray-500">{currentIdx + 1} / {list.length}</span>
               <button
-                onClick={goNext}
-                disabled={currentIdx === list.length - 1}
+                onClick={goNext} disabled={currentIdx === list.length - 1}
                 className="flex items-center px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 rounded-md hover:bg-gray-200 disabled:opacity-50"
               >
                 Suivant <ChevronRight className="h-4 w-4 ml-1" />
@@ -578,23 +579,16 @@ export default function StudentExam() {
               return (
                 <button
                   key={qq.id}
-                  onClick={() => {
-                    leaveCurrentQuestion();
-                    setCurrentIdx(i);
-                  }}
+                  onClick={() => { leaveCurrentQuestion(); setCurrentIdx(i); }}
                   className={`p-3 rounded-lg border-2 transition-colors ${
-                    active
-                      ? 'border-indigo-500 bg-indigo-50'
-                      : has
-                      ? 'border-green-500 bg-green-50'
-                      : 'border-gray-200 bg-white hover:bg-gray-50'
+                    active ? 'border-indigo-500 bg-indigo-50'
+                    : has ? 'border-green-500 bg-green-50'
+                    : 'border-gray-200 bg-white hover:bg-gray-50'
                   }`}
                 >
                   <div className="text-center">
                     <div className="font-semibold text-gray-900">{i + 1}</div>
-                    <div className="text-xs text-gray-600 mt-1">
-                      {has ? 'Répondu' : 'Non répondu'}
-                    </div>
+                    <div className="text-xs text-gray-600 mt-1">{has ? 'Répondu' : 'Non répondu'}</div>
                   </div>
                 </button>
               );
@@ -604,13 +598,10 @@ export default function StudentExam() {
 
         {/* PROCTORING: preview locale */}
         <div className="mt-8 bg-white rounded-lg shadow p-4">
-          <h3 className="text-sm font-medium text-gray-700 mb-2">
-            Aperçu caméra (visible uniquement par vous)
-          </h3>
+          <h3 className="text-sm font-medium text-gray-700 mb-2">Aperçu caméra (visible uniquement par vous)</h3>
           <video ref={videoRef} autoPlay playsInline muted className="w-full max-w-sm rounded border" />
           <p className="mt-2 text-xs text-gray-500">
-            La vidéo est transmise en direct à l’examinateur. Aucun enregistrement n’est effectué
-            côté serveur.
+            La vidéo est transmise en direct à l’examinateur. Aucun enregistrement n’est effectué côté serveur.
           </p>
         </div>
       </div>
