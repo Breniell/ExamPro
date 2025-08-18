@@ -1,6 +1,6 @@
 // src/routes/sessions.js
 const express = require('express');
-const { body } = require('express-validator');
+const { body, param } = require('express-validator');
 const { authenticateToken, requireRole } = require('../middleware/auth');
 const sessionController = require('../controllers/sessionController');
 
@@ -11,7 +11,7 @@ router.post(
   '/start',
   authenticateToken,
   requireRole(['student']),
-  body('exam_id').isUUID(),
+  body('exam_id').isUUID().withMessage('exam_id doit être un UUID'),
   sessionController.start
 );
 
@@ -19,6 +19,7 @@ router.post(
 router.get(
   '/:id',
   authenticateToken,
+  param('id').isUUID().withMessage('Session id invalide'),
   sessionController.getById
 );
 
@@ -26,13 +27,12 @@ router.get(
 router.post(
   '/:id/answers',
   authenticateToken,
-  requireRole(['student']),
   [
-    body('question_id').isUUID(),
-    body('time_spent').isInt({ min: 0 }),
-    // answer_text or selected_option required – custom check
-    body('answer_text').optional().isString(),
-    body('selected_option').optional().isString(),
+    param('id').isUUID().withMessage('Session id invalide'),
+    body('question_id').isUUID().withMessage('question_id requis et doit être un UUID'),
+    body('time_spent').optional().isInt({ min: 0 }).withMessage('time_spent doit être un entier >= 0'),
+    body('selected_option').optional({ nullable: true }).isString().withMessage('selected_option doit être une chaîne'),
+    body('answer_text').optional({ nullable: true }).isString().withMessage('answer_text doit être une chaîne'),
   ],
   sessionController.answer
 );
@@ -42,6 +42,7 @@ router.post(
   '/:id/submit',
   authenticateToken,
   requireRole(['student']),
+  param('id').isUUID().withMessage('Session id invalide'),
   sessionController.submit
 );
 
@@ -51,9 +52,10 @@ router.post(
   authenticateToken,
   requireRole(['student']),
   [
-    body('event_type').isString(),
-    body('event_data').notEmpty(),
-    body('severity').optional().isIn(['low','medium','high'])
+    param('id').isUUID().withMessage('Session id invalide'),
+    body('event_type').isString().notEmpty().withMessage('event_type requis'),
+    body('event_data').optional({ nullable: true }),
+    body('severity').optional().isIn(['low','medium','high']).withMessage('severity invalide'),
   ],
   sessionController.logSecurity
 );

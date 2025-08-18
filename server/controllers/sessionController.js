@@ -5,9 +5,16 @@ const { emitSecurityLog } = require('../socket/proctor'); // 👈 diffusion temp
 
 const VALID_SEVERITIES = new Set(['low', 'medium', 'high']);
 
+function sendValidation(res, errors) {
+  return res.status(400).json({
+    error: 'Validation error',
+    details: errors.array().map(e => ({ field: e.param, message: e.msg })),
+  });
+}
+
 async function start(req, res) {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+  if (!errors.isEmpty()) return sendValidation(res, errors);
 
   try {
     const session = await sessionService.startSession({
@@ -35,7 +42,7 @@ async function getById(req, res) {
 
 async function answer(req, res) {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+  if (!errors.isEmpty()) return sendValidation(res, errors);
 
   try {
     const ans = await sessionService.submitAnswer({
@@ -48,8 +55,10 @@ async function answer(req, res) {
     });
     res.json(ans);
   } catch (err) {
-    console.error('Submit answer error:', err);
-    res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
+    const status = err.status || 500;
+    const message = err.message || 'Internal server error';
+    if (status >= 500) console.error('Submit answer error:', err);
+    res.status(status).json({ error: message });
   }
 }
 
@@ -65,22 +74,23 @@ async function submit(req, res) {
         eventData: { by: req.user.id },
         severity: 'low',
       });
-      if (logRow) emitSecurityLog(logRow);
+      if (logRow && typeof emitSecurityLog === 'function') emitSecurityLog(logRow);
     } catch (e) {
-      // on n’échoue pas la soumission pour un log informatif
       console.warn('submit() logSecurityEvent failed (non-blocking):', e?.message || e);
     }
 
     res.json({ message: 'Exam submitted', session });
   } catch (err) {
-    console.error('Submit exam error:', err);
-    res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
+    const status = err.status || 500;
+    const message = err.message || 'Internal server error';
+    if (status >= 500) console.error('Submit exam error:', err);
+    res.status(status).json({ error: message });
   }
 }
 
 async function logSecurity(req, res) {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+  if (!errors.isEmpty()) return sendValidation(res, errors);
 
   const { event_type, event_data, severity = 'low' } = req.body;
 
@@ -89,7 +99,6 @@ async function logSecurity(req, res) {
   }
 
   try {
-    // 👉 IMPORTANT : on attend que le service RETOURNE la ligne insérée
     const logRow = await sessionService.logSecurityEvent({
       sessionId: req.params.id,
       eventType: event_type,
@@ -97,10 +106,8 @@ async function logSecurity(req, res) {
       severity,
     });
 
-    // Diffusion temps réel à tous les admins connectés
-    if (logRow) emitSecurityLog(logRow);
+    if (logRow && typeof emitSecurityLog === 'function') emitSecurityLog(logRow);
 
-    // On renvoie la ligne créée (meilleur DX côté FE)
     return res.status(201).json(logRow || { message: 'Security event logged' });
   } catch (err) {
     console.error('Security log error:', err);
