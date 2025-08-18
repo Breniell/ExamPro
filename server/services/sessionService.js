@@ -6,7 +6,7 @@ async function startSession({ examId, studentId, ip, ua }) {
   try {
     await client.query('BEGIN');
 
-    // Vérifier disponibilité de l’examen
+    // 1) Vérifier disponibilité de l’examen
     const examRes = await client.query(`
       SELECT id, title, duration_minutes, end_date
       FROM exams
@@ -17,7 +17,7 @@ async function startSession({ examId, studentId, ip, ua }) {
     `, [examId]);
     if (!examRes.rows.length) throw { status: 404, message: 'Exam not available' };
 
-    // Session existante ?
+    // 2) Regarder la DERNIÈRE session de cet étudiant pour cet exam
     const existRes = await client.query(`
       SELECT *
       FROM exam_sessions
@@ -27,11 +27,17 @@ async function startSession({ examId, studentId, ip, ua }) {
     `, [examId, studentId]);
 
     if (existRes.rows.length) {
-      await client.query('COMMIT');
-      return existRes.rows[0];
+      const last = existRes.rows[0];
+      if (last.status === 'in_progress') {
+        // -> Reprendre la session en cours
+        await client.query('COMMIT');
+        return last;
+      }
+      // last.status ∈ { 'submitted', 'graded', ... } => on crée une NOUVELLE session
+      // (si tu veux interdire le re-take, remplace par: throw { status: 409, message: 'Retake not allowed' })
     }
 
-    // Créer session
+    // 3) Créer une nouvelle session
     const insertRes = await client.query(`
       INSERT INTO exam_sessions (exam_id, student_id, ip_address, user_agent, status, started_at)
       VALUES ($1,$2,$3,$4,'in_progress', now())
