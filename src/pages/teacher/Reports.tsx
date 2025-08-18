@@ -14,8 +14,8 @@ type Exam = {
   title: string;
   status: 'draft' | 'published' | 'active' | 'completed' | 'archived';
   start_date?: string;
-  sessionscount?: number;
-  sessionsCount?: number;
+  sessionscount?: number | string;   // 👈 peut arriver en string
+  sessionsCount?: number | string;   // 👈 peut arriver en string
 };
 
 type SessionRow = {
@@ -29,8 +29,8 @@ type SessionRow = {
   submitted_at: string | null;
   graded_at: string | null;
   // si graded:
-  score_on20?: number | null;
-  score_pct?: number | null;
+  score_on20?: number | string | null; // 👈 peut arriver en string
+  score_pct?: number | string | null;  // 👈 peut arriver en string (% de 0 à 100)
 };
 
 type GradingQuestion = { question_id: string; max_points: number; points_awarded: number | null; };
@@ -53,13 +53,22 @@ type Aggregates = {
 const fmt = (d?: string | null) => d ? new Date(d).toLocaleString('fr-FR') : '—';
 const pct = (v: number) => `${Math.round(v)}%`;
 
+// 👇 util infaillible pour convertir string|number|null -> number
+function toNum(v: unknown, fallback = 0): number {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : fallback;
+  if (v === null || v === undefined) return fallback;
+  const n = parseFloat(String(v));
+  return Number.isFinite(n) ? n : fallback;
+}
+
 function rangeFor(key: DateRangeKey) {
-  const end = new Date(); // maintenant
+  const end = new Date();
   const start = new Date();
   if (key === 'week')  start.setDate(end.getDate() - 7);
   if (key === 'month') start.setMonth(end.getMonth() - 1);
   if (key === 'quarter') start.setMonth(end.getMonth() - 3);
-  if (key === 'year') start.setFullYear(end.getFullYear() - 1);
+  if (key === 'year') setTimeout(() => {}, 0); // noop to keep types happy
+  if (key === 'year')  start.setFullYear(end.getFullYear() - 1);
   return { from: start.toISOString(), to: end.toISOString() };
 }
 
@@ -100,9 +109,10 @@ export default function Reports() {
     let mounted = true;
     (async () => {
       try {
-        const list: Exam[] = await apiService.getExams();
+        const list: Exam[] = await apiService.getExams?.({ mine: 'true' }) // si ton API accepte "mine"
+          ?? await apiService.getExams(); // fallback
         if (!mounted) return;
-        setExams(list);
+        setExams(Array.isArray(list) ? list : []);
       } catch (e: any) {
         toast.error(e?.message || 'Impossible de charger les examens.');
       }
@@ -112,13 +122,13 @@ export default function Reports() {
 
   // Applique la plage de dates
   useEffect(() => {
-    if (dateKey === 'custom') return; // piloté par inputs
+    if (dateKey === 'custom') return;
     const r = rangeFor(dateKey);
     setFrom(r.from);
     setTo(r.to);
   }, [dateKey]);
 
-  // Requête sessions (table) — pas de mock : 100% backend
+  // Requête sessions (table)
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -134,8 +144,10 @@ export default function Reports() {
           pageSize
         });
         if (!mounted) return;
-        setSessions(res.items || []);
-        setTotal(res.total || 0);
+        const items = Array.isArray(res) ? res : (res?.items ?? []);
+        const tot = Array.isArray(res) ? items.length : toNum(res?.total, items.length);
+        setSessions(items);
+        setTotal(tot);
       } catch (e: any) {
         toast.error(e?.message || 'Erreur chargement des copies.');
       } finally {
@@ -145,13 +157,12 @@ export default function Reports() {
     return () => { mounted = false; };
   }, [status, examId, from, to, q, page, pageSize]);
 
-  // Requête agrégats — si l’endpoint existe on l’utilise; sinon fallback réel (sans mock) en calculant à partir des sessions graded
+  // Requête agrégats
   useEffect(() => {
     let mounted = true;
     (async () => {
       setKpisLoading(true);
       try {
-        // 1) On tente l’endpoint d’agrégats (recommandé)
         if (apiService.getReportAggregates) {
           const agg: Aggregates = await apiService.getReportAggregates({
             examId: examId === 'all' ? undefined : examId,
@@ -159,7 +170,7 @@ export default function Reports() {
           });
           if (mounted) setAggregates(agg);
         } else {
-          // 2) Fallback: calculer sur un échantillon graded (pas de mock, on appelle le backend)
+          // Fallback: calculer à partir d’un échantillon graded
           const graded = await apiService.getGradingSessions({
             status: 'graded',
             examId: examId === 'all' ? undefined : examId,
@@ -168,9 +179,9 @@ export default function Reports() {
             pageSize: 50
           });
 
-          // on récupère le détail des 50 premières sessions graded pour sommer les points
+          const gradedItems: SessionRow[] = Array.isArray(graded) ? graded : (graded?.items ?? []);
           const details: SessionDetail[] = await Promise.all(
-            (graded.items || []).map((s: SessionRow) => apiService.getGradingSession(s.session_id))
+            gradedItems.map((s: SessionRow) => apiService.getGradingSession(s.session_id))
           );
 
           let totalAwarded = 0, totalMax = 0;
@@ -178,9 +189,9 @@ export default function Reports() {
           const perStudentMap = new Map<string, { name: string; totals: number; maxes: number; exams: number }>();
 
           details.forEach((d, i) => {
-            const s = graded.items[i];
-            const awarded = d.questions.reduce((a, q) => a + (q.points_awarded || 0), 0);
-            const max = d.questions.reduce((a, q) => a + (q.max_points || 0), 0);
+            const s = gradedItems[i];
+            const awarded = d.questions.reduce((a, q) => a + toNum(q.points_awarded), 0);
+            const max = d.questions.reduce((a, q) => a + toNum(q.max_points), 0);
             totalAwarded += awarded; totalMax += max;
 
             const ex = perExamMap.get(d.session.exam_id) || { title: d.session.exam_title, totals: 0, maxes: 0, count: 0 };
@@ -227,7 +238,7 @@ export default function Reports() {
   const kpis = useMemo(() => {
     const totalExams = exams.length;
     const activeExams = exams.filter(e => e.status === 'active').length;
-    const totalSessions = exams.reduce((s, e) => s + Number(e.sessionsCount ?? e.sessionscount ?? 0), 0);
+    const totalSessions = exams.reduce((s, e) => s + toNum(e.sessionsCount ?? e.sessionscount), 0);
     return { totalExams, activeExams, totalSessions };
   }, [exams]);
 
@@ -382,7 +393,7 @@ export default function Reports() {
         <KPI icon={<BarChart3 className="h-8 w-8 text-blue-600" />} label="Total Examens" value={kpis.totalExams} color="border-blue-500" loading={kpisLoading} />
         <KPI icon={<Clock className="h-8 w-8 text-green-600" />} label="Examens Actifs" value={kpis.activeExams} color="border-green-500" loading={kpisLoading} />
         <KPI icon={<Users className="h-8 w-8 text-orange-600" />} label="Copies corrigées" value={aggregates.gradedCount} color="border-orange-500" loading={kpisLoading} />
-        <KPI icon={<TrendingUp className="h-8 w-8 text-purple-600" />} label="Score moyen" value={`${aggregates.avgOn20.toFixed(1)}/20`} color="border-purple-500" loading={kpisLoading} />
+        <KPI icon={<TrendingUp className="h-8 w-8 text-purple-600" />} label="Score moyen" value={`${toNum(aggregates.avgOn20).toFixed(1)}/20`} color="border-purple-500" loading={kpisLoading} />
       </div>
 
       {/* Résultats par examen + Top étudiants */}
@@ -392,24 +403,28 @@ export default function Reports() {
             <Empty text="Pas encore de copies corrigées sur la période." />
           ) : (
             <div className="space-y-4">
-              {aggregates.perExam.map(r => (
-                <div key={r.examId} className="border border-gray-200 rounded-lg p-4">
-                  <div className="flex items-center justify-between">
-                    <div className="font-medium text-gray-900">{r.examTitle}</div>
-                    <div className="text-sm text-gray-500">{r.gradedCount} corrigée(s)</div>
-                  </div>
-                  <div className="mt-3 grid grid-cols-3 gap-4 text-sm">
-                    <div><div className="text-gray-600">Moyenne</div><div className="font-semibold">{r.avgOn20.toFixed(1)}/20</div></div>
-                    <div><div className="text-gray-600">Réussite</div><div className="font-semibold">{pct(r.passRate)}</div></div>
-                    <div><div className="text-gray-600">Indice</div><div className="font-semibold">{Math.round(r.avgOn20 * 5)}</div></div>
-                  </div>
-                  <div className="mt-3">
-                    <div className="w-full bg-gray-200 rounded-full h-2">
-                      <div className="bg-green-600 h-2 rounded-full transition-all" style={{ width: `${(r.avgOn20 / 20) * 100}%` }} />
+              {aggregates.perExam.map(r => {
+                const avg = toNum(r.avgOn20);
+                const pr = toNum(r.passRate);
+                return (
+                  <div key={r.examId} className="border border-gray-200 rounded-lg p-4">
+                    <div className="flex items-center justify-between">
+                      <div className="font-medium text-gray-900">{r.examTitle}</div>
+                      <div className="text-sm text-gray-500">{r.gradedCount} corrigée(s)</div>
+                    </div>
+                    <div className="mt-3 grid grid-cols-3 gap-4 text-sm">
+                      <div><div className="text-gray-600">Moyenne</div><div className="font-semibold">{avg.toFixed(1)}/20</div></div>
+                      <div><div className="text-gray-600">Réussite</div><div className="font-semibold">{pct(pr)}</div></div>
+                      <div><div className="text-gray-600">Indice</div><div className="font-semibold">{Math.round(avg * 5)}</div></div>
+                    </div>
+                    <div className="mt-3">
+                      <div className="w-full bg-gray-200 rounded-full h-2">
+                        <div className="bg-green-600 h-2 rounded-full transition-all" style={{ width: `${(avg / 20) * 100}%` }} />
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </Card>
@@ -419,24 +434,27 @@ export default function Reports() {
             <Empty text="Pas de classement sur la période." />
           ) : (
             <div className="space-y-3">
-              {aggregates.topStudents.map((s, i) => (
-                <div key={s.name} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                  <div className="flex items-center">
-                    <div className={classNames(
-                      "w-8 h-8 rounded-full flex items-center justify-center text-white font-bold text-sm",
-                      i === 0 && "bg-yellow-500", i === 1 && "bg-gray-400", i === 2 && "bg-orange-600", i > 2 && "bg-gray-300"
-                    )}>{i + 1}</div>
-                    <div className="ml-3">
-                      <div className="font-medium text-gray-900">{s.name}</div>
-                      <div className="text-sm text-gray-600">{s.examsCount} examen(s)</div>
+              {aggregates.topStudents.map((s, i) => {
+                const avg = toNum(s.avgOn20);
+                return (
+                  <div key={s.name} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                    <div className="flex items-center">
+                      <div className={classNames(
+                        "w-8 h-8 rounded-full flex items-center justify-center text-white font-bold text-sm",
+                        i === 0 && "bg-yellow-500", i === 1 && "bg-gray-400", i === 2 && "bg-orange-600", i > 2 && "bg-gray-300"
+                      )}>{i + 1}</div>
+                      <div className="ml-3">
+                        <div className="font-medium text-gray-900">{s.name}</div>
+                        <div className="text-sm text-gray-600">{s.examsCount} examen(s)</div>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="font-bold text-gray-900">{avg.toFixed(1)}/20</div>
+                      <div className="text-sm text-gray-600">{pct((avg / 20) * 100)}</div>
                     </div>
                   </div>
-                  <div className="text-right">
-                    <div className="font-bold text-gray-900">{s.avgOn20.toFixed(1)}/20</div>
-                    <div className="text-sm text-gray-600">{pct((s.avgOn20 / 20) * 100)}</div>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </Card>
@@ -445,7 +463,7 @@ export default function Reports() {
       {/* Tableau des sessions */}
       <Card title="Copies (sessions candidats)" right={
         <div className="text-sm text-gray-600">
-          {total} résultat(s) • Page {page}/{totalPages}
+          {total} résultat(s) • Page {page}/{Math.max(1, Math.ceil(total / pageSize))}
         </div>
       }>
         {loading ? (
@@ -467,43 +485,51 @@ export default function Reports() {
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-100">
-                  {sessions.map(s => (
-                    <tr key={s.session_id} className="hover:bg-gray-50">
-                      <Td>
-                        <div className="font-medium text-gray-900">
-                          {s.first_name} {s.last_name}
-                        </div>
-                      </Td>
-                      <Td>
-                        <div className="text-gray-900">{s.exam_title}</div>
-                      </Td>
-                      <Td className="text-gray-700">{fmt(s.submitted_at)}</Td>
-                      <Td className="text-gray-700">{fmt(s.graded_at)}</Td>
-                      <Td>
-                        {s.status === 'graded'
-                          ? <div className="font-semibold text-gray-900">{(s.score_on20 ?? 0).toFixed(1)}/20</div>
-                          : <span className="text-gray-500">—</span>}
-                      </Td>
-                      <Td className="text-right">
-                        <div className="inline-flex items-center gap-2">
-                          <button
-                            className="inline-flex items-center px-3 py-1.5 rounded-md border text-sm hover:bg-gray-50"
-                            onClick={() => navigate(`/teacher/correction/${s.exam_id}?session=${s.session_id}`)}
-                            title="Voir la copie"
-                          >
-                            <Eye className="h-4 w-4 mr-1" /> Ouvrir
-                          </button>
-                          <button
-                            className="inline-flex items-center px-3 py-1.5 rounded-md bg-indigo-600 text-white hover:bg-indigo-700 text-sm"
-                            onClick={() => exportSessionPDF(s.session_id)}
-                            title="Exporter la copie (PDF)"
-                          >
-                            <Download className="h-4 w-4 mr-1" /> Copie PDF
-                          </button>
-                        </div>
-                      </Td>
-                    </tr>
-                  ))}
+                  {sessions.map(s => {
+                    // 👇 normalisation de la note pour éviter le crash
+                    let score20 = toNum(s.score_on20);
+                    if (!score20) {
+                      const pctVal = toNum(s.score_pct);
+                      if (pctVal) score20 = (pctVal / 100) * 20;
+                    }
+                    return (
+                      <tr key={s.session_id} className="hover:bg-gray-50">
+                        <Td>
+                          <div className="font-medium text-gray-900">
+                            {s.first_name} {s.last_name}
+                          </div>
+                        </Td>
+                        <Td>
+                          <div className="text-gray-900">{s.exam_title}</div>
+                        </Td>
+                        <Td className="text-gray-700">{fmt(s.submitted_at)}</Td>
+                        <Td className="text-gray-700">{fmt(s.graded_at)}</Td>
+                        <Td>
+                          {s.status === 'graded'
+                            ? <div className="font-semibold text-gray-900">{score20.toFixed(1)}/20</div>
+                            : <span className="text-gray-500">—</span>}
+                        </Td>
+                        <Td className="text-right">
+                          <div className="inline-flex items-center gap-2">
+                            <button
+                              className="inline-flex items-center px-3 py-1.5 rounded-md border text-sm hover:bg-gray-50"
+                              onClick={() => navigate(`/teacher/correction/${s.exam_id}?session=${s.session_id}`)}
+                              title="Voir la copie"
+                            >
+                              <Eye className="h-4 w-4 mr-1" /> Ouvrir
+                            </button>
+                            <button
+                              className="inline-flex items-center px-3 py-1.5 rounded-md bg-indigo-600 text-white hover:bg-indigo-700 text-sm"
+                              onClick={() => exportSessionPDF(s.session_id)}
+                              title="Exporter la copie (PDF)"
+                            >
+                              <Download className="h-4 w-4 mr-1" /> Copie PDF
+                            </button>
+                          </div>
+                        </Td>
+                      </tr>
+                    );
+                  })}
                   {!sessions.length && (
                     <tr><Td colSpan={6}><Empty text="Aucune copie ne correspond à vos filtres." /></Td></tr>
                   )}
@@ -515,23 +541,23 @@ export default function Reports() {
             <div className="flex items-center justify-between pt-4">
               <button
                 onClick={() => setPage(p => Math.max(1, p - 1))}
-                disabled={!canPrev}
+                disabled={page <= 1}
                 className={classNames(
                   "inline-flex items-center px-3 py-1.5 rounded-md border text-sm",
-                  !canPrev && "opacity-50 cursor-not-allowed",
-                  canPrev && "hover:bg-gray-50"
+                  page <= 1 && "opacity-50 cursor-not-allowed",
+                  page > 1 && "hover:bg-gray-50"
                 )}
               >
                 <ChevronLeft className="h-4 w-4 mr-1" /> Précédent
               </button>
-              <div className="text-sm text-gray-600">Page {page} / {totalPages}</div>
+              <div className="text-sm text-gray-600">Page {page} / {Math.max(1, Math.ceil(total / pageSize))}</div>
               <button
-                onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-                disabled={!canNext}
+                onClick={() => setPage(p => Math.min(Math.max(1, Math.ceil(total / pageSize)), p + 1))}
+                disabled={page >= Math.max(1, Math.ceil(total / pageSize))}
                 className={classNames(
                   "inline-flex items-center px-3 py-1.5 rounded-md border text-sm",
-                  !canNext && "opacity-50 cursor-not-allowed",
-                  canNext && "hover:bg-gray-50"
+                  page >= Math.max(1, Math.ceil(total / pageSize)) && "opacity-50 cursor-not-allowed",
+                  page < Math.max(1, Math.ceil(total / pageSize)) && "hover:bg-gray-50"
                 )}
               >
                 Suivant <ChevronRight className="h-4 w-4 ml-1" />

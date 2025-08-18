@@ -28,13 +28,13 @@ const Login: React.FC = () => {
     <TransitionWrapper>
       <div className="max-w-md w-full space-y-8">
         <div className="text-center">
-          <div className="flex items-center gap-2 font-bold text-white/90 select-none">
-          <span className="inline-flex items-center justify-center rounded-md bg-white px-1.5 py-1 ring-1 ring-black/10 shadow-sm">
-            <img src={examproLogo} alt="ExamPro" className="h-7 w-auto drop-shadow-[0_0_8px_rgba(255,255,255,0.7)]" />
-          </span>
-          <span className="text-lg tracking-wide">ExamPro</span>
-        </div>
-          <p className="mt-2 text-sm text-gray-600">Connexion à votre espace sécurisé</p>
+          <div className="flex items-center justify-center gap-3 font-bold select-none">
+            <span className="inline-flex items-center justify-center rounded-md bg-white/95 px-2 py-1 ring-1 ring-black/10 shadow-sm">
+              <img src={examproLogo} alt="ExamPro" className="h-7 w-auto" />
+            </span>
+            <span className="text-lg tracking-wide text-white/95">ExamPro</span>
+          </div>
+          <p className="mt-2 text-sm text-gray-200">Connexion à votre espace sécurisé</p>
         </div>
 
         <AuthCard>

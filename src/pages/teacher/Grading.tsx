@@ -13,7 +13,7 @@ type SessionRow = {
   last_name: string;
   answers_count: string | number;
   graded_count: string | number;
-  submitted_at: string;
+  submitted_at: string | null; // ← accepte null
 };
 
 type GradingDetail = {
@@ -40,8 +40,18 @@ export default function TeacherGrading() {
   const loadList = async () => {
     setLoadingList(true);
     try {
-      const data = await apiService.getGradingSessions({ status: 'submitted' });
-      setRows(data || []);
+      const resp = await apiService.getGradingSessions({
+        status: 'submitted',
+        page: 1,
+        pageSize: 50,
+      });
+
+      // Unwrap: accepte {items,total} OU un tableau brut
+      const items: SessionRow[] = Array.isArray(resp)
+        ? resp
+        : (resp?.items ?? []);
+
+      setRows(items);
     } catch (e) {
       console.error(e);
       toast.error('Impossible de charger les copies à corriger.');
@@ -145,7 +155,11 @@ export default function TeacherGrading() {
                           {r.first_name} {r.last_name}
                         </div>
                         <div className="text-xs text-gray-500 mt-1">
-                          Soumis le {new Date(r.submitted_at).toLocaleString('fr-FR')}
+                          {r.submitted_at ? (
+                            <>Soumis le {new Date(r.submitted_at).toLocaleString('fr-FR')}</>
+                          ) : (
+                            <>Soumission —</>
+                          )}
                         </div>
                         <div className="mt-2 w-full bg-gray-200 rounded-full h-1.5">
                           <div className="bg-indigo-600 h-1.5 rounded-full" style={{ width: `${done}%` }} />
@@ -209,6 +223,7 @@ export default function TeacherGrading() {
                       <label className="block text-sm font-medium text-gray-700">
                         Note (/{q.max_points})
                         <input
+                          id={`pts-${q.question_id}`} // ← nécessaire pour la lecture dans la textarea.onBlur
                           type="number"
                           min={0}
                           max={q.max_points}
@@ -226,7 +241,10 @@ export default function TeacherGrading() {
                         <textarea
                           defaultValue={q.feedback ?? ''}
                           onBlur={(e) => {
-                            const v = parseFloat((document.querySelector(`#pts-${q.question_id}`) as HTMLInputElement)?.value || `${q.points_awarded ?? 0}`);
+                            const v = parseFloat(
+                              (document.querySelector(`#pts-${q.question_id}`) as HTMLInputElement)?.value
+                              || `${q.points_awarded ?? 0}`
+                            );
                             saveGrade(q.question_id, isNaN(v) ? (q.points_awarded ?? 0) : v, e.target.value);
                           }}
                           rows={2}
