@@ -302,42 +302,120 @@ export default function StudentExam() {
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
   };
 
-  const handleSubmit = async () => {
-    if (!session?.id || !exam) return;
-    if (submittedRef.current) return;
-    submittedRef.current = true;
-    setIsSubmitting(true);
-    try {
-      leaveCurrentQuestion();
-
-      await Promise.all(
-        exam.questions.map(async (qq) => {
-          const val = answers[qq.id] ?? '';
-          const payload: any = {
-            question_id: qq.id,
-            time_spent: Math.max(0, Math.floor(timeSpent.current[qq.id] || 0)),
-          };
-          if (qq.type === 'qcm' || qq.type === 'true_false') {
-            payload.selected_option = val || null; payload.answer_text = null;
-          } else {
-            payload.answer_text = val || ''; payload.selected_option = null;
-          }
-          return apiService.submitAnswer(session.id, payload);
-        })
-      );
-
-      await apiService.submitExam(session.id);
-      toast.success('Examen soumis avec succès !');
-      navigate('/student', { replace: true });
-    } catch (e: any) {
-      console.error(e);
-      toast.error(e?.message || 'Soumission impossible.');
-      submittedRef.current = false; // autorise retry manuel
-    } finally {
-      setIsSubmitting(false);
-      cleanupProctoring();
+  // ⬇️ ajoute ce helper quelque part au-dessus de handleSubmit
+function validateBeforeSubmit(exam: ExamPayload, answers: Record<string, string>) {
+  // règle: tu peux décider que les QCM et true_false sont "obligatoires".
+  // ici: on exige une réponse pour qcm/true_false, on autorise text vide.
+  for (let i = 0; i < exam.questions.length; i++) {
+    const qq = exam.questions[i];
+    const val = answers[qq.id];
+    if ((qq.type === 'qcm' || qq.type === 'true_false') && !val) {
+      return { ok: false, index: i, message: `La question ${i + 1} est obligatoire.` };
     }
-  };
+  }
+  return { ok: true };
+}
+
+// ⬇️ remplace entièrement ton handleSubmit existant par celui-ci
+const handleSubmit = async () => {
+  if (!session?.id || !exam) return;
+
+  // confirmation utilisateur
+  const confirmed = window.confirm(
+    "Confirmer la soumission ?\n\nAprès validation, vous ne pourrez plus modifier vos réponses."
+  );
+  if (!confirmed) return;
+
+  // vérifs côté client (évite des erreurs 400 côté API)
+  const check = validateBeforeSubmit(exam, answers);
+  if (!check.ok) {
+    // on va sur la 1ère question manquante et on explique
+    leaveCurrentQuestion();
+    setCurrentIdx(check.index!);
+    toast.error(check.message || 'Certaines réponses sont manquantes.');
+    return;
+  }
+
+  if (isSubmitting) return; // garde-fou UI
+  setIsSubmitting(true);
+
+  // on NE bloque PAS la seconde soumission via submittedRef tant que tout n'est pas ok
+  try {
+    leaveCurrentQuestion();
+
+    // Log "tentative de soumission" (non bloquant)
+    if (session?.id) {
+      apiService.logSecurityEvent(session.id, {
+        event_type: 'attempt_submit',
+        event_data: { at: new Date().toISOString() },
+        severity: 'low',
+      }).catch(() => {});
+    }
+
+    // Soumission séquentielle (plus simple pour diagnostiquer)
+    for (let i = 0; i < exam.questions.length; i++) {
+      const qq = exam.questions[i];
+      const val = answers[qq.id] ?? '';
+
+      const payload: any = {
+        question_id: qq.id,
+        time_spent: Math.max(0, Math.floor(timeSpent.current[qq.id] || 0)),
+      };
+
+      if (qq.type === 'qcm' || qq.type === 'true_false') {
+        payload.selected_option = val || null;
+        payload.answer_text = null;
+      } else {
+        payload.answer_text = val || '';
+        payload.selected_option = null;
+      }
+
+      try {
+        await apiService.submitAnswer(session.id, payload);
+      } catch (err: any) {
+        // on remonte l'utilisateur sur la question fautive
+        setCurrentIdx(i);
+        const msg = err?.message || 'Erreur de sauvegarde de la réponse.';
+        toast.error(`Q${i + 1}: ${msg}`);
+        // log fail (non bloquant)
+        apiService.logSecurityEvent(session.id, {
+          event_type: 'answer_submit_failed',
+          event_data: { questionId: qq.id, message: msg },
+          severity: 'medium',
+        }).catch(() => {});
+        throw err; // on arrête tout de suite
+      }
+    }
+
+    // Si on arrive ici, toutes les réponses ont été acceptées → on finalise
+    try {
+      await apiService.submitExam(session.id);
+    } catch (err: any) {
+      const msg = err?.message || 'Erreur lors de la finalisation.';
+      toast.error(msg);
+      // log fail
+      apiService.logSecurityEvent(session.id, {
+        event_type: 'final_submit_failed',
+        event_data: { message: msg },
+        severity: 'high',
+      }).catch(() => {});
+      return; // ne pas marquer comme soumis
+    }
+
+    // succès final : on verrouille, on nettoie, on sort
+    submittedRef.current = true;
+    toast.success('Examen soumis avec succès !');
+    cleanupProctoring();
+    navigate('/student', { replace: true });
+
+  } catch (e) {
+    // déjà toasts individuels, on garde une trace générique
+    console.error('Submit flow error:', e);
+  } finally {
+    setIsSubmitting(false);
+  }
+};
+
 
   const progress = useMemo(
     () => (list.length ? ((currentIdx + 1) / list.length) * 100 : 0),
