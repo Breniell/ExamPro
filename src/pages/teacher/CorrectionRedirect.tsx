@@ -25,7 +25,7 @@ export default function TeacherCorrectionRedirect() {
       try {
         // 2) Récupérer les examens du prof (le BE peut ignorer des filtres inconnus — pas grave)
         const resp = await apiService.getExams({
-          mine: true,
+          mine: "true",
           status: 'published',
           page: 1,
           pageSize: 50,
