@@ -1,12 +1,12 @@
 import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Shield } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import TextInput from '../../components/ui/TextInput';
 import PasswordInput from '../../components/ui/PasswordInput';
 import Spinner from '../../components/ui/Spinner';
 import AuthCard from '../../components/ui/AuthCard';
 import TransitionWrapper from '../../components/animation/TransitionWrapper';
+import examproLogo from '../assets/exampro_logo_2.png';
 
 const Register: React.FC = () => {
   const { register, loading } = useAuth();
@@ -48,9 +48,14 @@ const Register: React.FC = () => {
     <TransitionWrapper>
       <div className="max-w-md w-full space-y-8">
         <div className="text-center">
-          <Shield className="mx-auto h-12 w-12 text-indigo-600" />
+          <div className="flex items-center gap-2 font-bold text-white/90 select-none">
+          <span className="inline-flex items-center justify-center rounded-md bg-white px-1.5 py-1 ring-1 ring-black/10 shadow-sm">
+            <img src={examproLogo} alt="ExamPro" className="h-7 w-auto drop-shadow-[0_0_8px_rgba(255,255,255,0.7)]" />
+          </span>
+          <span className="text-lg tracking-wide">ExamPro</span>
+        </div>
           <h2 className="mt-6 text-3xl font-extrabold text-gray-900">Créer un compte</h2>
-          <p className="mt-2 text-sm text-gray-600">Rejoignez ExamSecure</p>
+          <p className="mt-2 text-sm text-gray-600">Rejoignez ExamPro</p>
         </div>
 
         <AuthCard>
