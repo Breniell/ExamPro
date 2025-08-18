@@ -7,7 +7,7 @@ import Spinner from '../../components/ui/Spinner';
 import PasswordInput from '../../components/ui/PasswordInput';
 import TextInput from '../../components/ui/TextInput';
 import AuthCard from '../../components/ui/AuthCard';
-import examproLogo from '../assets/exampro_logo_2.png';
+import examproLogo from '../../assets/exampro_logo_2.png';
 
 const Login: React.FC = () => {
   const { login, loading } = useAuth();

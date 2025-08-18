@@ -6,7 +6,7 @@ import PasswordInput from '../../components/ui/PasswordInput';
 import Spinner from '../../components/ui/Spinner';
 import AuthCard from '../../components/ui/AuthCard';
 import TransitionWrapper from '../../components/animation/TransitionWrapper';
-import examproLogo from '../assets/exampro_logo_2.png';
+import examproLogo from '../../assets/exampro_logo_2.png';
 
 const Register: React.FC = () => {
   const { register, loading } = useAuth();
