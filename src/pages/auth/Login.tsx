@@ -7,6 +7,7 @@ import Spinner from '../../components/ui/Spinner';
 import PasswordInput from '../../components/ui/PasswordInput';
 import TextInput from '../../components/ui/TextInput';
 import AuthCard from '../../components/ui/AuthCard';
+import examproLogo from '../assets/exampro_logo_2.png';
 
 const Login: React.FC = () => {
   const { login, loading } = useAuth();
@@ -27,8 +28,12 @@ const Login: React.FC = () => {
     <TransitionWrapper>
       <div className="max-w-md w-full space-y-8">
         <div className="text-center">
-          <Shield className="mx-auto h-12 w-12 text-indigo-600" />
-          <h2 className="mt-6 text-3xl font-extrabold text-gray-900">ExamSecure</h2>
+          <div className="flex items-center gap-2 font-bold text-white/90 select-none">
+          <span className="inline-flex items-center justify-center rounded-md bg-white px-1.5 py-1 ring-1 ring-black/10 shadow-sm">
+            <img src={examproLogo} alt="ExamPro" className="h-7 w-auto drop-shadow-[0_0_8px_rgba(255,255,255,0.7)]" />
+          </span>
+          <span className="text-lg tracking-wide">ExamPro</span>
+        </div>
           <p className="mt-2 text-sm text-gray-600">Connexion à votre espace sécurisé</p>
         </div>
 
