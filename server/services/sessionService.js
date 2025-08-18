@@ -6,7 +6,6 @@ async function startSession({ examId, studentId, ip, ua }) {
   try {
     await client.query('BEGIN');
 
-    // Examen disponible
     const examRes = await client.query(
       `SELECT id, title, duration_minutes, start_date, end_date, status
        FROM exams
@@ -18,7 +17,6 @@ async function startSession({ examId, studentId, ip, ua }) {
     );
     if (!examRes.rows.length) throw { status: 404, message: 'Exam not available' };
 
-    // Session existante ?
     const existRes = await client.query(
       `SELECT * FROM exam_sessions
        WHERE exam_id = $1 AND student_id = $2
@@ -31,7 +29,6 @@ async function startSession({ examId, studentId, ip, ua }) {
       return existRes.rows[0];
     }
 
-    // Créer session
     const insertRes = await client.query(
       `INSERT INTO exam_sessions (exam_id, student_id, ip_address, user_agent, status, started_at)
        VALUES ($1,$2,$3,$4,'in_progress', now())
@@ -59,7 +56,7 @@ async function getSession(sessionId, user) {
   } else if (user.role === 'teacher') {
     params.push(user.id);
     whereAuth = 'AND e.teacher_id = $2';
-  } // admin: pas de filtre
+  }
 
   const { rows } = await pool.query(
     `SELECT es.*, e.title, e.duration_minutes, e.end_date, e.teacher_id
@@ -73,14 +70,74 @@ async function getSession(sessionId, user) {
   return rows[0];
 }
 
+/** 
+ * Récupère {id,type,options} d'une question pour un exam donné,
+ * quel que soit le schéma réel.
+ */
+async function getQuestionMeta(questionId, examId) {
+  // 1) Essai exam_questions
+  try {
+    const r = await pool.query(
+      `SELECT id, type, options
+       FROM exam_questions
+       WHERE id = $1 AND exam_id = $2`,
+      [questionId, examId]
+    );
+    if (r.rows[0]) return r.rows[0];
+  } catch (e) {
+    // 42P01 = undefined_table -> on ignore et on tente la suite
+    if (e.code && e.code !== '42P01') throw e;
+  }
+
+  // 2) Essai questions
+  try {
+    const r = await pool.query(
+      `SELECT id, type, options
+       FROM questions
+       WHERE id = $1 AND exam_id = $2`,
+      [questionId, examId]
+    );
+    if (r.rows[0]) return r.rows[0];
+  } catch (e) {
+    if (e.code && e.code !== '42P01') throw e;
+  }
+
+  // 3) Fallback JSON: exams.questions (array d'objets)
+  try {
+    const r = await pool.query(
+      `SELECT questions
+       FROM exams
+       WHERE id = $1`,
+      [examId]
+    );
+    const row = r.rows[0];
+    if (row && row.questions) {
+      const arr = Array.isArray(row.questions) ? row.questions : [];
+      const found = arr.find(q => String(q.id) === String(questionId));
+      if (found) {
+        // normaliser pour l'appelant
+        return {
+          id: found.id,
+          type: found.type,
+          options: found.options ?? null,
+        };
+      }
+    }
+  } catch (e) {
+    // si table/colonne absente, on tombera sur l'erreur plus lisible ci-dessous
+  }
+
+  return null;
+}
+
 /**
- * Vérifie le type de question et normalise la réponse.
- * - QCM / TRUE_FALSE : selected_option requis (+ contrôle liste si fournie)
- * - TEXT            : answer_text string (vide autorisé)
- * Upsert dans "answers" avec accumulation de time_spent.
+ * - Vérifie session
+ * - Récupère meta question (table exam_questions OU questions OU JSON)
+ * - QCM/TRUE_FALSE -> selected_option requis (+ contrôle liste si fournie)
+ * - TEXT -> answer_text string
+ * - Upsert + accumulation time_spent
  */
 async function submitAnswer({ sessionId, questionId, answerText, selectedOption, timeSpent, studentId }) {
-  // Session
   const sessRes = await pool.query(
     `SELECT es.id, es.exam_id, es.student_id, es.status
      FROM exam_sessions es
@@ -92,14 +149,8 @@ async function submitAnswer({ sessionId, questionId, answerText, selectedOption,
   if (sess.student_id !== studentId) throw { status: 403, message: 'Access denied' };
   if (sess.status !== 'in_progress') throw { status: 400, message: 'Session not in progress' };
 
-  // Question meta
-  const qRes = await pool.query(
-    `SELECT id, type, options
-     FROM exam_questions
-     WHERE id = $1 AND exam_id = $2`,
-    [questionId, sess.exam_id]
-  );
-  const q = qRes.rows[0];
+  // ✅ meta question robuste
+  const q = await getQuestionMeta(questionId, sess.exam_id);
   if (!q) throw { status: 400, message: 'Question inconnue pour cet examen' };
 
   const spent = Number.isFinite(+timeSpent) ? Math.max(0, parseInt(timeSpent, 10)) : 0;
@@ -122,7 +173,6 @@ async function submitAnswer({ sessionId, questionId, answerText, selectedOption,
     _selectedOption = null;
   }
 
-  // Upsert + accumulation du temps passé
   const { rows } = await pool.query(
     `INSERT INTO answers (session_id, question_id, answer_text, selected_option, time_spent, created_at, updated_at)
      VALUES ($1,$2,$3,$4,$5, now(), now())
@@ -154,11 +204,9 @@ async function submitExam(sessionId, studentId) {
 async function logSecurityEvent({ sessionId, eventType, eventData, severity = 'low' }) {
   if (!['low','medium','high'].includes(severity)) severity = 'low';
 
-  // S’assurer que la session existe (évite l’erreur FK générique)
   const s = await pool.query(`SELECT id FROM exam_sessions WHERE id = $1`, [sessionId]);
   if (!s.rows[0]) throw { status: 404, message: 'Session introuvable' };
 
-  // Normaliser event_data → JSONB
   let dataForDb = null;
   try {
     if (eventData === null || eventData === undefined) {
