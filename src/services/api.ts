@@ -266,6 +266,23 @@ class ApiService {
     }
   }
 
+    // ---------- Admin / Charts ----------
+  async getAdminChartStats(): Promise<{ labels: string[]; userCounts: number[]; examCounts: number[]; }> {
+    try {
+      const res = await this.requestJSON('/admin/charts/overview');
+      // normalise le résultat minimal pour éviter des plantages d'UI
+      return {
+        labels: Array.isArray(res?.labels) ? res.labels : [],
+        userCounts: Array.isArray(res?.userCounts) ? res.userCounts : [],
+        examCounts: Array.isArray(res?.examCounts) ? res.examCounts : [],
+      };
+    } catch (e) {
+      // fallback : aucun data => le composant affichera "Aucune donnée"
+      return { labels: [], userCounts: [], examCounts: [] };
+    }
+  }
+
+
   // Compte des caméras actives (si pas d’endpoint → 0)
   async getActiveCamerasCount(): Promise<{ count: number }> {
     try {

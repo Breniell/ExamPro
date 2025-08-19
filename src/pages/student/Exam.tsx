@@ -160,17 +160,28 @@ export default function StudentExam() {
 
     sock.on('connect_error', () => toast.error('Connexion au centre de contrôle indisponible (WS).'));
 
-    sock.on('request-offer', async ({ adminSocketId, sessionId }) => {
-      if (!sess?.id || sessionId !== sess.id) return;
-      await createAndSendOffer(adminSocketId);
-    });
+        // L’admin demande une offre
+        sock.on('request-offer', async ({ adminSocketId, sessionId }) => {
+          if (!sess?.id || sessionId !== sess.id) return;
 
-    sock.on('webrtc-answer', async ({ from, description }) => {
-      const pc = peers.current.get(from);
-      if (pc && description) {
-        await pc.setRemoteDescription(new RTCSessionDescription(description));
-      }
-    });
+          // si un PC existait déjà pour cet admin → ferme-le pour repartir clean
+          const old = peers.current.get(adminSocketId);
+          if (old) {
+            try { old.close(); } catch {}
+            peers.current.delete(adminSocketId);
+          }
+          await createAndSendOffer(adminSocketId);
+        });
+
+
+        // Réponse admin
+        sock.on('webrtc-answer', async ({ from, description }) => {
+          const pc = peers.current.get(from);
+          if (pc && description?.type === 'answer') {
+            try { await pc.setRemoteDescription(new RTCSessionDescription(description)); } catch {}
+          }
+        });
+
 
     sock.on('webrtc-ice-candidate', async ({ from, candidate }) => {
       const pc = peers.current.get(from);

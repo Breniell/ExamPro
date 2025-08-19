@@ -114,9 +114,12 @@ export default function AdminProctorCenter() {
           stopViewing(sessionId);
         });
 
-        // OFFRE (étudiant -> admin)
+        // OFFRE (étudiant -> admin) avec perfect negotiation (admin = polite)
         sock.on('webrtc-offer', async ({ from, sessionId, description }) => {
           try {
+            // on ignore les trucs bizarres
+            if (!description || description.type !== 'offer') return;
+
             let viewer = viewersRef.current.get(sessionId);
             if (!viewer) {
               const pc = new RTCPeerConnection({ iceServers: iceServers() });
@@ -125,10 +128,18 @@ export default function AdminProctorCenter() {
 
               pc.ontrack = (ev) => {
                 if (!viewer!.stream) viewer!.stream = new MediaStream();
-                viewer!.stream.addTrack(ev.track);
+                // évite les doublons (même track ajoutée plusieurs fois)
+                const already = viewer!.stream.getTracks().some(t => t.id === ev.track.id);
+                if (!already) viewer!.stream.addTrack(ev.track);
+
                 ev.track.onended = () => {
-                  try { viewer!.stream?.removeTrack(ev.track as any); } catch {}
+                  try {
+                    viewer!.stream?.getTracks()
+                      .filter(t => t.id === ev.track.id)
+                      .forEach(t => viewer!.stream?.removeTrack(t));
+                  } catch {}
                 };
+
                 const v = videoEls.current.get(sessionId);
                 if (v) {
                   v.srcObject = viewer!.stream!;
@@ -144,14 +155,40 @@ export default function AdminProctorCenter() {
                   });
                 }
               };
+
+              pc.onconnectionstatechange = () => {
+                if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+                  // on ferme proprement si ça part en vrille
+                  stopViewing(sessionId);
+                }
+              };
             }
 
-            await viewer.pc.setRemoteDescription(new RTCSessionDescription(description));
-            const answer = await viewer.pc.createAnswer();
-            await viewer.pc.setLocalDescription(answer);
+            const pc = viewer.pc;
+            const offer = new RTCSessionDescription(description);
+
+            // --- perfect negotiation (admin = polite) ---
+            const offerCollision = pc.signalingState !== 'stable';
+            if (offerCollision) {
+              // rollback avant de poser la nouvelle remote offer
+              try {
+                await Promise.all([
+                  pc.setLocalDescription({ type: 'rollback' } as any),
+                  pc.setRemoteDescription(offer),
+                ]);
+              } catch {
+                // si rollback indispo/échoue, tente au moins la remote
+                await pc.setRemoteDescription(offer);
+              }
+            } else {
+              await pc.setRemoteDescription(offer);
+            }
+
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
 
             socketRef.current?.emit('webrtc-answer', {
-              to: from, sessionId, description: viewer.pc.localDescription
+              to: from, sessionId, description: pc.localDescription
             });
 
             sockToSession.current.set(from, sessionId);
@@ -160,6 +197,7 @@ export default function AdminProctorCenter() {
             toast.error('Erreur de négociation WebRTC.');
           }
         });
+
 
         // ICE (étudiant -> admin)
         sock.on('webrtc-ice-candidate', async ({ from, candidate }) => {
@@ -209,6 +247,8 @@ export default function AdminProctorCenter() {
   function watchSession(sessionId: string) {
     const meta = sessions[sessionId];
     if (!meta?.online) { toast.error('Candidat hors-ligne.'); return; }
+    // ferme un viewer existant pour repartir propre
+    stopViewing(sessionId);
     socketRef.current?.emit('watch-session', { sessionId });
   }
 
