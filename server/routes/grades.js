@@ -6,6 +6,17 @@ const gradeController = require('../controllers/gradeController');
 
 const router = express.Router();
 
+/* ==================== ÉTUDIANT ==================== */
+// GET /api/grades/student
+router.get(
+  '/student',
+  authenticateToken,
+  requireRole(['student']),
+  gradeController.studentGrades
+);
+
+/* ==================== ENSEIGNANT ==================== */
+
 // LISTE des sessions à corriger / corrigées
 // GET /api/grades/sessions?examId=&status=submitted|graded
 router.get(

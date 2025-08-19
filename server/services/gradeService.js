@@ -1,9 +1,23 @@
 // src/services/gradeService.js
 const pool = require('../config/database');
 
+/* util: détecter si des colonnes existent dans une table */
+async function getExistingColumns(tableName, colNames = []) {
+  if (!colNames.length) return new Set();
+  const { rows } = await pool.query(
+    `
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_name = $1
+      AND column_name = ANY($2)
+    `,
+    [tableName, colNames]
+  );
+  return new Set(rows.map(r => r.column_name));
+}
+
 /**
  * Liste des sessions à corriger (ou corrigées) pour un prof.
- * ⚠️ COUNT(DISTINCT ...) pour éviter les doubles-comptes dus aux LEFT JOIN multiples.
  */
 async function listSessionsToGrade(teacherId, filters = {}) {
   const { examId, status } = filters;
@@ -45,7 +59,6 @@ async function listSessionsToGrade(teacherId, filters = {}) {
 
 /**
  * Détail d’une session pour correction : questions, réponses, notes.
- * Vérifie que le teacher est bien propriétaire de l’examen.
  */
 async function getSessionForGrading(sessionId, teacherId) {
   const sess = await pool.query(`
@@ -81,17 +94,13 @@ async function getSessionForGrading(sessionId, teacherId) {
 
 /**
  * Noter (upsert) une question d’une session.
- * - Vérifie que la session appartient à un exam du prof
- * - Vérifie que la question appartient au même exam que la session
- * - Ne dépasse pas le max
- * - Upsert avec ton schéma (max_points, graded_by)
  */
 async function gradeQuestion({ sessionId, questionId, teacherId, pointsAwarded, feedback }) {
   // Autorisation + cohérence (question ↔ examen de la session)
   const verif = await pool.query(`
     SELECT q.points AS max_points
     FROM exam_sessions s
-    JOIN exams e   ON e.id = s.exam_id AND e.teacher_id = $3
+    JOIN exams e     ON e.id = s.exam_id AND e.teacher_id = $3
     JOIN questions q ON q.id = $2 AND q.exam_id = s.exam_id
     WHERE s.id = $1
   `, [sessionId, questionId, teacherId]);
@@ -119,10 +128,9 @@ async function gradeQuestion({ sessionId, questionId, teacherId, pointsAwarded, 
 
 /**
  * Finaliser la correction : toutes les questions de l’examen doivent être notées.
- * Vérifie aussi que le professeur est bien propriétaire.
  */
 async function finalizeGrading(sessionId, teacherId) {
-  // Vérifier droits prof + récupérer exam_id
+  // Vérifier droits prof
   const sRes = await pool.query(`
     SELECT s.id, s.exam_id, s.status
     FROM exam_sessions s
@@ -130,13 +138,12 @@ async function finalizeGrading(sessionId, teacherId) {
     WHERE s.id = $1 AND e.teacher_id = $2
   `, [sessionId, teacherId]);
   if (!sRes.rows.length) throw { status: 403, message: 'Forbidden' };
-  const { exam_id: examId } = sRes.rows[0];
 
   // Toutes les questions sont-elles notées ?
   const chk = await pool.query(`
     SELECT
-      COUNT(q.id)::int                         AS total,
-      COUNT(DISTINCT g.question_id)::int       AS graded
+      COUNT(q.id)::int                   AS total,
+      COUNT(DISTINCT g.question_id)::int AS graded
     FROM questions q
     JOIN exam_sessions es ON q.exam_id = es.exam_id
     LEFT JOIN grades g    ON g.session_id = es.id AND g.question_id = q.id
@@ -170,9 +177,78 @@ async function finalizeGrading(sessionId, teacherId) {
   }
 }
 
+/* ============== ÉTUDIANT : liste de ses copies/notes (robuste) ============== */
+async function listStudentGrades(studentId, { from, to, q, status } = {}) {
+  // Détecter dynamiquement les colonnes présentes
+  const has = await getExistingColumns('exam_sessions', ['submitted_at', 'started_at', 'created_at', 'graded_at']);
+
+  // Colonnes existantes → SELECT
+  const selectGradedAt = has.has('graded_at') ? 'es.graded_at' : 'NULL AS graded_at';
+
+  // Filtre temporel : on privilégie submitted_at, sinon created_at, sinon started_at
+  const dateCols = ['submitted_at', 'created_at', 'started_at'].filter(c => has.has(c));
+  const bestDateCol = dateCols[0]; // peut être undefined si aucune n’existe (très improbable)
+
+  // ORDER BY: on coalesce uniquement avec les colonnes qui existent
+  const orderParts = ['submitted_at', 'started_at', 'created_at'].filter(c => has.has(c)).map(c => `es.${c}`);
+  const orderExpr = orderParts.length ? orderParts.join(', ') : 'es.id'; // fallback très basique
+
+  // WHERE dynamique
+  const params = [studentId];
+  let where = `es.student_id = $1`;
+
+  if (from && bestDateCol) { params.push(from); where += ` AND es.${bestDateCol} >= $${params.length}`; }
+  if (to   && bestDateCol) { params.push(to);   where += ` AND es.${bestDateCol} <= $${params.length}`; }
+  if (status)              { params.push(status); where += ` AND es.status = $${params.length}`; }
+  if (q) {
+    params.push(`%${q.toLowerCase()}%`);
+    where += ` AND (LOWER(e.title) LIKE $${params.length})`;
+  }
+
+  const sql = `
+    WITH qmax AS (
+      SELECT exam_id, SUM(points) AS total_max
+      FROM questions
+      GROUP BY exam_id
+    ),
+    awarded AS (
+      SELECT g.session_id, COALESCE(SUM(g.points_awarded),0) AS total_awarded
+      FROM grades g
+      GROUP BY g.session_id
+    )
+    SELECT
+      es.id            AS session_id,
+      es.exam_id,
+      e.title          AS exam_title,
+      es.status,
+      ${selectGradedAt},
+      ${has.has('submitted_at') ? 'es.submitted_at' : 'NULL AS submitted_at'},
+      COALESCE(a.total_awarded, 0) AS total_awarded,
+      COALESCE(qm.total_max, 0)    AS total_max,
+      CASE WHEN COALESCE(qm.total_max,0) > 0
+           THEN ROUND((COALESCE(a.total_awarded,0) / qm.total_max) * 100, 2)
+           ELSE 0 END             AS score_pct,
+      CASE WHEN COALESCE(qm.total_max,0) > 0
+           THEN ROUND((COALESCE(a.total_awarded,0) / qm.total_max) * 20, 2)
+           ELSE 0 END             AS score_on20
+    FROM exam_sessions es
+    JOIN exams e ON e.id = es.exam_id
+    LEFT JOIN qmax qm ON qm.exam_id = es.exam_id
+    LEFT JOIN awarded a ON a.session_id = es.id
+    WHERE ${where}
+    ORDER BY ${orderExpr} DESC NULLS LAST
+    LIMIT 200
+  `;
+
+  const { rows } = await pool.query(sql, params);
+  return rows;
+}
+
 module.exports = {
   listSessionsToGrade,
   getSessionForGrading,
   gradeQuestion,
-  finalizeGrading
+  finalizeGrading,
+  // Étudiant
+  listStudentGrades,
 };

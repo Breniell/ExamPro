@@ -7,6 +7,7 @@ import {
   Monitor, Play, StopCircle, VideoOff, Camera as CameraIcon, Users, Search,
   Maximize2, Volume2, VolumeX, Camera
 } from 'lucide-react';
+import { useLocation } from 'react-router-dom';
 
 type SessionMeta = {
   sessionId: string;
@@ -38,6 +39,9 @@ export default function AdminProctorCenter() {
   const cardEls = useRef<Map<string, HTMLDivElement | null>>(new Map());
   const sockToSession = useRef<Map<string, string>>(new Map());   // student socketId -> sessionId
 
+  const location = useLocation();
+  const watchQuery = new URLSearchParams(location.search).get('watch') || '';
+
   useEffect(() => {
     let mounted = true;
 
@@ -54,6 +58,10 @@ export default function AdminProctorCenter() {
 
         sock.on('connect', () => mounted && setConnected(true));
         sock.on('disconnect', () => mounted && setConnected(false));
+        sock.on('connect_error', (err: any) => {
+          console.error('WS error', err);
+          toast.error('Connexion WS impossible (proctor). Vérifiez VITE_WS_URL / CORS.');
+        });
 
         sock.on('sessions-list', (list: Array<{ sessionId: string; students: number; admins: number; examTitle: string | null; studentName?: string|null }>) => {
           if (!mounted) return;
@@ -70,6 +78,11 @@ export default function AdminProctorCenter() {
             };
           });
           setSessions(map);
+
+          // ⬇️ auto-watch via ?watch=
+          if (watchQuery && map[watchQuery]?.online) {
+            setTimeout(() => watchSession(watchQuery), 0);
+          }
         });
 
         sock.on('presence', (p: { sessionId: string; students: number; admins: number; meta?: { examTitle?: string|null; studentName?: string|null } }) => {
@@ -86,6 +99,10 @@ export default function AdminProctorCenter() {
             };
             return { ...prev, [p.sessionId]: next };
           });
+
+          if (watchQuery && p.sessionId === watchQuery && (p.students || 0) > 0) {
+            setTimeout(() => watchSession(watchQuery), 0);
+          }
         });
 
         sock.on('session-left', ({ sessionId }: { sessionId: string; socketId: string }) => {
@@ -107,18 +124,15 @@ export default function AdminProctorCenter() {
               viewersRef.current.set(sessionId, viewer);
 
               pc.ontrack = (ev) => {
-                // Fusionner les tracks (audio + vidéo) dans un seul MediaStream
                 if (!viewer!.stream) viewer!.stream = new MediaStream();
                 viewer!.stream.addTrack(ev.track);
                 ev.track.onended = () => {
-                  try {
-                    viewer!.stream?.removeTrack(ev.track as any);
-                  } catch {}
+                  try { viewer!.stream?.removeTrack(ev.track as any); } catch {}
                 };
                 const v = videoEls.current.get(sessionId);
                 if (v) {
                   v.srcObject = viewer!.stream!;
-                  v.muted = viewer!.muted; // état actuel
+                  v.muted = viewer!.muted;
                   v.play().catch(() => {});
                 }
               };
@@ -177,7 +191,7 @@ export default function AdminProctorCenter() {
       }
       sockToSession.current.clear();
     };
-  }, []);
+  }, [watchQuery]);
 
   const filtered = useMemo(() => {
     const list = Object.values(sessions);

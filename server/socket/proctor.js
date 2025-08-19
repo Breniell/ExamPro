@@ -36,18 +36,20 @@ function ensureRoom(sessionId) {
   return r;
 }
 
+// ⬇️ 1) Diffuser la présence à TOUS les admins (nsp.emit) + à la room
 function broadcastPresence(nsp, sessionId, r) {
-  nsp.to(`sess:${sessionId}`).emit('presence', {
+  const payload = {
     sessionId,
     students: r.students.size,
     admins: r.admins.size,
     meta: r.meta || {},
-  });
+  };
+  nsp.emit('presence', payload);                 // ← tous les admins
+  nsp.to(`sess:${sessionId}`).emit('presence', payload); // ← membres de la room
 }
 
 function leaveAll(socket, nsp) {
   const sid = socket.id;
-  // si c'était un étudiant, connaître la session
   const wasInSession = studentToSession.get(sid);
 
   for (const [sessionId, r] of rooms) {
@@ -64,7 +66,6 @@ function leaveAll(socket, nsp) {
     }
   }
 
-  // notifier toujours un départ étudiant (plus parlant côté admin)
   if (wasInSession) {
     studentToSession.delete(sid);
     nsp.emit('session-left', { sessionId: wasInSession, socketId: sid });
@@ -72,12 +73,23 @@ function leaveAll(socket, nsp) {
 }
 
 function initProctoring(server) {
+  // autoriser localhost/LAN en dev
+  const allowDevOrigin = (origin) => {
+    if (!origin) return true;
+    const re = /^http:\/\/(localhost|127\.0\.0\.1|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})(:\d+)?$/;
+    return re.test(origin);
+  };
+
+  const prodOrigins = (process.env.FE_ORIGIN || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean); // supporte plusieurs origines séparées par des virgules
+
   const io = new Server(server, {
     cors: {
-      origin:
-        process.env.NODE_ENV === 'production'
-          ? process.env.FE_ORIGIN
-          : 'http://localhost:5173',
+      origin: process.env.NODE_ENV === 'production'
+        ? (prodOrigins.length ? prodOrigins : true) // si FE_ORIGIN manquant → autorise (utile en préview)
+        : (origin, cb) => cb(null, allowDevOrigin(origin)),
       credentials: true,
     },
     path: '/ws/socket.io',
@@ -112,13 +124,16 @@ function initProctoring(server) {
       broadcastPresence(nsp, sessionId, r);
     });
 
-    // métadonnées publiées par les étudiants
+    // Métadonnées publiées par les étudiants
     socket.on('session-meta', ({ sessionId, examTitle, studentName }) => {
       if (!sessionId) return;
       const r = ensureRoom(sessionId);
-      r.meta = { ...(r.meta || {}), ...(examTitle ? { examTitle } : {}), ...(studentName ? { studentName } : {}) };
+      r.meta = {
+        ...(r.meta || {}),
+        ...(examTitle ? { examTitle } : {}),
+        ...(studentName ? { studentName } : {}),
+      };
 
-      // notifier tout le monde (les admins enrichissent leur grille)
       nsp.emit('session-meta', {
         sessionId,
         examTitle: r.meta.examTitle || null,
@@ -142,10 +157,15 @@ function initProctoring(server) {
       socket.emit('sessions-list', list);
     });
 
-    // ADMIN: demande de regarder une session
+    // ⬇️ 3) ADMIN: regarder une session → on JOINT la room et on déclenche la requête d’offre
     socket.on('watch-session', ({ sessionId }) => {
       if (socket.user?.role !== 'admin') return;
       if (!sessionId) return;
+      const r = ensureRoom(sessionId);
+      r.admins.add(socket.id);
+      socket.join(`sess:${sessionId}`);
+      broadcastPresence(nsp, sessionId, r);
+
       nsp.to(`sess:${sessionId}`).emit('request-offer', {
         adminSocketId: socket.id,
         sessionId,
@@ -179,7 +199,7 @@ function emitSecurityLog(logRow) {
   ioRef.of('/proctor').emit('security-log', logRow);
 }
 
-function emitSecurityLogResolved(payload /* { id, resolved: true } ou log complet */) {
+function emitSecurityLogResolved(payload) {
   if (!ioRef) return;
   ioRef.of('/proctor').emit('security-log-resolved', payload);
 }
@@ -187,6 +207,6 @@ function emitSecurityLogResolved(payload /* { id, resolved: true } ou log comple
 module.exports = {
   initProctoring,
   getProctorSnapshot,
-  emitSecurityLog,           // <--- nouveau
-  emitSecurityLogResolved,   // <--- nouveau
+  emitSecurityLog,
+  emitSecurityLogResolved,
 };

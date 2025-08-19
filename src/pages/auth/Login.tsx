@@ -32,9 +32,9 @@ const Login: React.FC = () => {
             <span className="inline-flex items-center justify-center rounded-md bg-white/95 px-2 py-1 ring-1 ring-black/10 shadow-sm">
               <img src={examproLogo} alt="ExamPro" className="h-7 w-auto" />
             </span>
-            <span className="text-lg tracking-wide text-white/95">ExamPro</span>
+            <span className="text-lg tracking-wide text-black/95">ExamPro</span>
           </div>
-          <p className="mt-2 text-sm text-gray-200">Connexion à votre espace sécurisé</p>
+          <p className="mt-2 text-sm text-black-200">Connexion à votre espace sécurisé</p>
         </div>
 
         <AuthCard>
@@ -52,7 +52,7 @@ const Login: React.FC = () => {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
-              placeholder="votre@email.com"
+              placeholder="Entrez votre addresse mail"
             />
 
             <PasswordInput

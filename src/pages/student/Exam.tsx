@@ -1,4 +1,3 @@
-// src/pages/student/Exam.tsx
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { toast } from 'react-hot-toast';
@@ -11,7 +10,7 @@ type ExamQuestion = {
   text: string;
   type: 'qcm' | 'text' | 'true_false';
   points: number;
-  options?: string[] | null;
+  options?: any; // normalisé plus bas
 };
 
 type ExamPayload = {
@@ -46,7 +45,11 @@ export default function StudentExam() {
   const [cameraActive, setCameraActive] = useState(false);
   const [focusWarnings, setFocusWarnings] = useState(0);
 
-  // Nouveaux états proctoring
+  // états UI supplémentaires
+  const [camPrompt, setCamPrompt] = useState(false);   // demande explicite caméra
+  const [fatalError, setFatalError] = useState<string | null>(null); // erreur bloquante sans redirection
+
+  // proctoring UI
   const [audioEnabled, setAudioEnabled] = useState(false);
   const [screenActive, setScreenActive] = useState(false);
 
@@ -57,7 +60,7 @@ export default function StudentExam() {
   const audioTrack = useRef<MediaStreamTrack | null>(null);
 
   const socketRef = useRef<ReturnType<typeof connectProctorSocket> | null>(null);
-  const peers = useRef<Map<string, RTCPeerConnection>>(new Map()); // adminSocketId -> pc
+  const peers = useRef<Map<string, RTCPeerConnection>>(new Map());
 
   // time-spent par question
   const timeSpent = useRef<Record<string, number>>({});
@@ -66,123 +69,160 @@ export default function StudentExam() {
   // anti double submit
   const submittedRef = useRef(false);
 
+  /** Normalise les options (string "a,b", array, objet {A:"..."}) → string[] */
+  function optionsToArray(raw: any): string[] {
+    if (!raw) return [];
+    if (Array.isArray(raw)) return raw.map(String).filter(Boolean);
+    if (typeof raw === 'string') {
+      return raw.split(/\r?\n|,/).map(s => s.trim()).filter(Boolean);
+    }
+    if (typeof raw === 'object') {
+      try { return Object.values(raw).map(String).filter(Boolean); } catch { return []; }
+    }
+    return [];
+  }
+
+  /** Attache le flux caméra à la balise <video> si dispo */
+  function attachVideo() {
+    const el = videoRef.current;
+    if (el && camStream.current) {
+      try {
+        // @ts-ignore
+        el.srcObject = camStream.current;
+        el.play().catch(() => {});
+      } catch {}
+    }
+  }
+
+  /** Demande l'accès caméra (sans redirection si refus) */
+  async function ensureCamera(): Promise<void> {
+    if (camStream.current && camStream.current.getVideoTracks().some(t => t.readyState === 'live')) {
+      setCameraActive(true);
+      attachVideo();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      camStream.current = stream;
+      setCameraActive(true);
+      attachVideo();
+      setCamPrompt(false);
+    } catch {
+      setCameraActive(false);
+      setCamPrompt(true); // on affiche l'écran "autoriser caméra"
+      throw new Error('La webcam est requise');
+    }
+  }
+
+  /** Démarre tout le flow après caméra OK */
+  async function startExamFlow() {
+    if (!examId) throw new Error('Identifiant examen manquant.');
+    // 1) Récup examen
+    const ex: ExamPayload = await apiService.getExam(examId);
+    setExam(ex);
+
+    // 2) Démarrer session
+    const started = await apiService.startExamSession(examId);
+
+    // 3) Récup détail session
+    const det = await apiService.getSession(started.id);
+    const sess: SessionDetail = {
+      id: det.id,
+      exam_id: det.exam_id,
+      title: det.title,
+      duration_minutes: det.duration_minutes,
+      end_date: det.end_date,
+      started_at: det.started_at,
+    };
+    setSession(sess);
+
+    // 4) WebSocket proctor
+    const token = localStorage.getItem('token') || '';
+    const me = await apiService.getCurrentUser().catch(() => null as any);
+    const studentName =
+      me && (me.first_name || me.last_name)
+        ? `${me.first_name || ''} ${me.last_name || ''}`.trim()
+        : null;
+
+    const sock = connectProctorSocket(token);
+    socketRef.current = sock;
+
+    sock.on('connect', () => {
+      if (det?.id) {
+        sock.emit('join-session', { sessionId: det.id });
+        sock.emit('session-meta', {
+          sessionId: det.id,
+          examTitle: ex?.title || null,
+          studentName: studentName || null,
+        } as any);
+      }
+    });
+
+    sock.on('connect_error', () => toast.error('Connexion au centre de contrôle indisponible (WS).'));
+
+    sock.on('request-offer', async ({ adminSocketId, sessionId }) => {
+      if (!sess?.id || sessionId !== sess.id) return;
+      await createAndSendOffer(adminSocketId);
+    });
+
+    sock.on('webrtc-answer', async ({ from, description }) => {
+      const pc = peers.current.get(from);
+      if (pc && description) {
+        await pc.setRemoteDescription(new RTCSessionDescription(description));
+      }
+    });
+
+    sock.on('webrtc-ice-candidate', async ({ from, candidate }) => {
+      const pc = peers.current.get(from);
+      if (pc && candidate) {
+        try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch {}
+      }
+    });
+
+    // Timer
+    const startMs = new Date(sess.started_at).getTime();
+    const endByDuration = startMs + sess.duration_minutes * 60_000;
+    const hardEnd = new Date(sess.end_date).getTime();
+    const deadline = Math.min(endByDuration, isFinite(hardEnd) ? hardEnd : endByDuration);
+    setTimeLeft(Math.max(0, Math.floor((deadline - Date.now()) / 1000)));
+
+    // Warn close
+    const beforeUnload = (e: BeforeUnloadEvent) => {
+      if (!submittedRef.current) { e.preventDefault(); e.returnValue = ''; }
+    };
+    window.addEventListener('beforeunload', beforeUnload);
+    enterAt.current = Date.now();
+
+    return () => window.removeEventListener('beforeunload', beforeUnload);
+  }
+
+  // Boot
   useEffect(() => {
     let mounted = true;
-    const boot = async () => {
+    (async () => {
       if (!examId) return;
       setLoading(true);
       try {
-        // 0) Caméra obligatoire (audio off au départ)
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-          camStream.current = stream;
-          setCameraActive(true);
-          if (videoRef.current) {
-            videoRef.current.srcObject = stream;
-            videoRef.current.play().catch(() => {});
-          }
-        } catch {
-          toast.error('La webcam est requise pour passer cet examen.');
-          navigate('/student', { replace: true });
-          return;
-        }
-
-        // 1) récupérer examen
-        const ex: ExamPayload = await apiService.getExam(examId);
-        if (!mounted) return;
-        setExam(ex);
-
-        // 2) démarrer session (si pas déjà démarrée côté BE)
-        const started = await apiService.startExamSession(examId);
-        if (!mounted) return;
-
-        // 3) détail session
-        const det = await apiService.getSession(started.id);
-        if (!mounted) return;
-
-        const sess: SessionDetail = {
-          id: det.id,
-          exam_id: det.exam_id,
-          title: det.title,
-          duration_minutes: det.duration_minutes,
-          end_date: det.end_date,
-          started_at: det.started_at,
-        };
-        setSession(sess);
-
-        // 4) Socket
-        const token = localStorage.getItem('token') || '';
-        const me = await apiService.getCurrentUser().catch(() => null as any);
-        const studentName =
-          me && (me.first_name || me.last_name)
-            ? `${me.first_name || ''} ${me.last_name || ''}`.trim()
-            : null;
-
-        const sock = connectProctorSocket(token);
-        socketRef.current = sock;
-
-        sock.on('connect', () => {
-          if (det?.id) {
-            sock.emit('join-session', { sessionId: det.id });
-            sock.emit('session-meta', {
-              sessionId: det.id,
-              examTitle: ex?.title || null,
-              studentName: studentName || null,
-            } as any);
-          }
-        });
-
-        sock.on('connect_error', () => toast.error('Connexion au centre de contrôle indisponible (WS).'));
-
-        // L’admin demande une offre
-        sock.on('request-offer', async ({ adminSocketId, sessionId }) => {
-          if (!sess?.id || sessionId !== sess.id) return;
-          await createAndSendOffer(adminSocketId);
-        });
-
-        // Réponse admin
-        sock.on('webrtc-answer', async ({ from, description }) => {
-          const pc = peers.current.get(from);
-          if (pc && description) {
-            await pc.setRemoteDescription(new RTCSessionDescription(description));
-          }
-        });
-
-        // ICE
-        sock.on('webrtc-ice-candidate', async ({ from, candidate }) => {
-          const pc = peers.current.get(from);
-          if (pc && candidate) {
-            try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch {}
-          }
-        });
-
-        // Timer
-        const startMs = new Date(sess.started_at).getTime();
-        const endByDuration = startMs + sess.duration_minutes * 60_000;
-        const hardEnd = new Date(sess.end_date).getTime();
-        const deadline = Math.min(endByDuration, isFinite(hardEnd) ? hardEnd : endByDuration);
-        setTimeLeft(Math.max(0, Math.floor((deadline - Date.now()) / 1000)));
-
-        // Warn close
-        const beforeUnload = (e: BeforeUnloadEvent) => {
-          if (!submittedRef.current) { e.preventDefault(); e.returnValue = ''; }
-        };
-        window.addEventListener('beforeunload', beforeUnload);
-        enterAt.current = Date.now();
-
-        return () => { window.removeEventListener('beforeunload', beforeUnload); };
+        await ensureCamera();           // peut lever → camPrompt activé
+        await startExamFlow();          // peut lever → fatalError
       } catch (e: any) {
-        console.error(e);
-        toast.error(e?.message || "Impossible d'ouvrir l'examen.");
-        navigate('/student', { replace: true });
+        // si c'est un refus caméra, camPrompt est à true → on ne met pas fatalError
+        if (!camPrompt) {
+          const msg = e?.message || "Impossible d'ouvrir l'examen.";
+          setFatalError(msg);
+          toast.error(msg);
+        }
       } finally {
         if (mounted) setLoading(false);
       }
-    };
-    boot();
+    })();
+
     return () => { mounted = false; cleanupProctoring(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [examId]);
+
+  // si caméra obtienue après coup, re-attacher
+  useEffect(() => { attachVideo(); }, [cameraActive]);
 
   function cleanupProctoring() {
     for (const pc of peers.current.values()) { try { pc.close(); } catch {} }
@@ -302,120 +342,103 @@ export default function StudentExam() {
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
   };
 
-  // ⬇️ ajoute ce helper quelque part au-dessus de handleSubmit
-function validateBeforeSubmit(exam: ExamPayload, answers: Record<string, string>) {
-  // règle: tu peux décider que les QCM et true_false sont "obligatoires".
-  // ici: on exige une réponse pour qcm/true_false, on autorise text vide.
-  for (let i = 0; i < exam.questions.length; i++) {
-    const qq = exam.questions[i];
-    const val = answers[qq.id];
-    if ((qq.type === 'qcm' || qq.type === 'true_false') && !val) {
-      return { ok: false, index: i, message: `La question ${i + 1} est obligatoire.` };
-    }
-  }
-  return { ok: true };
-}
-
-// ⬇️ remplace entièrement ton handleSubmit existant par celui-ci
-const handleSubmit = async () => {
-  if (!session?.id || !exam) return;
-
-  // confirmation utilisateur
-  const confirmed = window.confirm(
-    "Confirmer la soumission ?\n\nAprès validation, vous ne pourrez plus modifier vos réponses."
-  );
-  if (!confirmed) return;
-
-  // vérifs côté client (évite des erreurs 400 côté API)
-  const check = validateBeforeSubmit(exam, answers);
-  if (!check.ok) {
-    // on va sur la 1ère question manquante et on explique
-    leaveCurrentQuestion();
-    setCurrentIdx(check.index!);
-    toast.error(check.message || 'Certaines réponses sont manquantes.');
-    return;
-  }
-
-  if (isSubmitting) return; // garde-fou UI
-  setIsSubmitting(true);
-
-  // on NE bloque PAS la seconde soumission via submittedRef tant que tout n'est pas ok
-  try {
-    leaveCurrentQuestion();
-
-    // Log "tentative de soumission" (non bloquant)
-    if (session?.id) {
-      apiService.logSecurityEvent(session.id, {
-        event_type: 'attempt_submit',
-        event_data: { at: new Date().toISOString() },
-        severity: 'low',
-      }).catch(() => {});
-    }
-
-    // Soumission séquentielle (plus simple pour diagnostiquer)
+  function validateBeforeSubmit(exam: ExamPayload, answers: Record<string, string>) {
     for (let i = 0; i < exam.questions.length; i++) {
       const qq = exam.questions[i];
-      const val = answers[qq.id] ?? '';
+      const val = answers[qq.id];
+      if ((qq.type === 'qcm' || qq.type === 'true_false') && !val) {
+        return { ok: false, index: i, message: `La question ${i + 1} est obligatoire.` };
+      }
+    }
+    return { ok: true };
+  }
 
-      const payload: any = {
-        question_id: qq.id,
-        time_spent: Math.max(0, Math.floor(timeSpent.current[qq.id] || 0)),
-      };
+  const handleSubmit = async () => {
+    if (!session?.id || !exam) return;
 
-      if (qq.type === 'qcm' || qq.type === 'true_false') {
-        payload.selected_option = val || null;
-        payload.answer_text = null;
-      } else {
-        payload.answer_text = val || '';
-        payload.selected_option = null;
+    const confirmed = window.confirm(
+      "Confirmer la soumission ?\n\nAprès validation, vous ne pourrez plus modifier vos réponses."
+    );
+    if (!confirmed) return;
+
+    const check = validateBeforeSubmit(exam, answers);
+    if (!check.ok) {
+      leaveCurrentQuestion();
+      setCurrentIdx(check.index!);
+      toast.error(check.message || 'Certaines réponses sont manquantes.');
+      return;
+    }
+
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+
+    try {
+      leaveCurrentQuestion();
+
+      if (session?.id) {
+        apiService.logSecurityEvent(session.id, {
+          event_type: 'attempt_submit',
+          event_data: { at: new Date().toISOString() },
+          severity: 'low',
+        }).catch(() => {});
+      }
+
+      for (let i = 0; i < exam.questions.length; i++) {
+        const qq = exam.questions[i];
+        const val = answers[qq.id] ?? '';
+
+        const payload: any = {
+          question_id: qq.id,
+          time_spent: Math.max(0, Math.floor(timeSpent.current[qq.id] || 0)),
+        };
+
+        if (qq.type === 'qcm' || qq.type === 'true_false') {
+          payload.selected_option = val || null;
+          payload.answer_text = null;
+        } else {
+          payload.answer_text = val || '';
+          payload.selected_option = null;
+        }
+
+        try {
+          await apiService.submitAnswer(session.id, payload);
+        } catch (err: any) {
+          setCurrentIdx(i);
+          const msg = err?.message || 'Erreur de sauvegarde de la réponse.';
+          toast.error(`Q${i + 1}: ${msg}`);
+          apiService.logSecurityEvent(session.id, {
+            event_type: 'answer_submit_failed',
+            event_data: { questionId: qq.id, message: msg },
+            severity: 'medium',
+          }).catch(() => {});
+          throw err;
+        }
       }
 
       try {
-        await apiService.submitAnswer(session.id, payload);
+        await apiService.submitExam(session.id);
       } catch (err: any) {
-        // on remonte l'utilisateur sur la question fautive
-        setCurrentIdx(i);
-        const msg = err?.message || 'Erreur de sauvegarde de la réponse.';
-        toast.error(`Q${i + 1}: ${msg}`);
-        // log fail (non bloquant)
+        const msg = err?.message || 'Erreur lors de la finalisation.';
+        toast.error(msg);
         apiService.logSecurityEvent(session.id, {
-          event_type: 'answer_submit_failed',
-          event_data: { questionId: qq.id, message: msg },
-          severity: 'medium',
+          event_type: 'final_submit_failed',
+          event_data: { message: msg },
+          severity: 'high',
         }).catch(() => {});
-        throw err; // on arrête tout de suite
+        return;
       }
+
+      submittedRef.current = true;
+      toast.success('Examen soumis avec succès !');
+      cleanupProctoring();
+      navigate('/student', { replace: true });
+
+    } catch (e) {
+      console.error('Submit flow error:', e);
+    } finally {
+      setIsSubmitting(false);
     }
-
-    // Si on arrive ici, toutes les réponses ont été acceptées → on finalise
-    try {
-      await apiService.submitExam(session.id);
-    } catch (err: any) {
-      const msg = err?.message || 'Erreur lors de la finalisation.';
-      toast.error(msg);
-      // log fail
-      apiService.logSecurityEvent(session.id, {
-        event_type: 'final_submit_failed',
-        event_data: { message: msg },
-        severity: 'high',
-      }).catch(() => {});
-      return; // ne pas marquer comme soumis
-    }
-
-    // succès final : on verrouille, on nettoie, on sort
-    submittedRef.current = true;
-    toast.success('Examen soumis avec succès !');
-    cleanupProctoring();
-    navigate('/student', { replace: true });
-
-  } catch (e) {
-    // déjà toasts individuels, on garde une trace générique
-    console.error('Submit flow error:', e);
-  } finally {
-    setIsSubmitting(false);
-  }
-};
-
+  };
 
   const progress = useMemo(
     () => (list.length ? ((currentIdx + 1) / list.length) * 100 : 0),
@@ -430,18 +453,13 @@ const handleSubmit = async () => {
         const track = a.getAudioTracks()[0];
         audioTrack.current = track;
         setAudioEnabled(true);
-        // injecter sur les PCs existants
         for (const pc of peers.current.values()) {
           pc.addTrack(track, new MediaStream([track]));
         }
-        // rattacher aussi localement
         if (camStream.current) camStream.current.addTrack(track);
       } else {
         setAudioEnabled(false);
-        if (audioTrack.current) {
-          // mute sans renégociation
-          audioTrack.current.enabled = false;
-        }
+        if (audioTrack.current) audioTrack.current.enabled = false;
       }
     } catch {
       toast.error("Micro non disponible.");
@@ -450,14 +468,11 @@ const handleSubmit = async () => {
 
   async function startScreenShare() {
     try {
-      // getDisplayMedia donne une vidéo
       const disp = await (navigator.mediaDevices as any).getDisplayMedia({ video: true, audio: false });
       const track: MediaStreamTrack = disp.getVideoTracks()[0];
       screenTrack.current = track;
       setScreenActive(true);
-      // Remplacer la piste vidéo envoyée vers tous les PCs
       await replaceVideoForAllPeers(track);
-      // preview locale = on montre toujours la caméra à l’étudiant (plus naturel)
       track.onended = async () => { await stopScreenShare(); };
       toast.success("Partage d'écran activé (visible côté examinateur).");
     } catch {
@@ -478,8 +493,9 @@ const handleSubmit = async () => {
 
   const renderAnswer = () => {
     if (!q) return null;
+
     if (q.type === 'qcm') {
-      const opts = Array.isArray(q.options) ? q.options : [];
+      const opts = optionsToArray(q.options);
       return (
         <div className="space-y-3">
           {opts.map((opt, i) => (
@@ -492,11 +508,14 @@ const handleSubmit = async () => {
               <span className="ml-3 text-gray-700">{opt}</span>
             </label>
           ))}
+          {!opts.length && <div className="text-sm text-amber-600">Aucune option disponible pour cette question.</div>}
         </div>
       );
     }
+
     if (q.type === 'true_false') {
-      const tf = Array.isArray(q.options) && q.options?.length === 2 ? q.options : ['Vrai', 'Faux'];
+      const tfRaw = optionsToArray(q.options);
+      const tf = tfRaw.length === 2 ? tfRaw : ['Vrai', 'Faux'];
       return (
         <div className="space-y-3">
           {tf.map((opt) => (
@@ -512,6 +531,7 @@ const handleSubmit = async () => {
         </div>
       );
     }
+
     return (
       <textarea
         value={answers[q.id] || ''} onChange={(e) => setAnswer(q.id, e.target.value)}
@@ -521,10 +541,70 @@ const handleSubmit = async () => {
     );
   };
 
-  if (loading || !exam || !session || !q) {
+  // ==== ÉTATS UI ====
+
+  // Chargement initial
+  if (loading && !exam && !session && !camPrompt && !fatalError) {
     return <div className="min-h-[50vh] grid place-items-center text-gray-600">Chargement de l’examen…</div>;
   }
 
+  // Demande caméra
+  if (camPrompt) {
+    return (
+      <div className="min-h-[60vh] grid place-items-center">
+        <div className="bg-white rounded-lg shadow p-6 max-w-md w-full text-center">
+          <Camera className="h-8 w-8 text-red-500 mx-auto mb-2" />
+          <h2 className="text-lg font-semibold text-gray-900">Autorisation nécessaire</h2>
+          <p className="mt-2 text-gray-600 text-sm">
+            La webcam est requise pour passer cet examen. Autorisez l’accès puis réessayez.
+          </p>
+          <div className="mt-4 flex items-center justify-center gap-2">
+            <button
+              onClick={async () => {
+                setLoading(true);
+                try { await ensureCamera(); await startExamFlow(); }
+                catch (e: any) { if (!e?.message?.includes('webcam')) setFatalError(e?.message || 'Erreur lors du démarrage.'); }
+                finally { setLoading(false); }
+              }}
+              className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700"
+            >
+              Réessayer
+            </button>
+            <button
+              onClick={() => navigate('/student')}
+              className="px-4 py-2 bg-gray-100 rounded-md hover:bg-gray-200"
+            >
+              Retour
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Erreur bloquante API (sans redirection auto)
+  if (fatalError) {
+    return (
+      <div className="min-h-[60vh] grid place-items-center">
+        <div className="bg-white rounded-lg shadow p-6 max-w-md w-full text-center">
+          <AlertTriangle className="h-8 w-8 text-red-500 mx-auto mb-2" />
+          <h2 className="text-lg font-semibold text-gray-900">Impossible d’ouvrir l’examen</h2>
+          <p className="mt-2 text-gray-600 text-sm">{fatalError}</p>
+          <div className="mt-4">
+            <button onClick={() => navigate('/student')} className="px-4 py-2 bg-gray-100 rounded-md hover:bg-gray-200">
+              Retour aux examens
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!exam || !session || !q) {
+    return <div className="min-h-[50vh] grid place-items-center text-gray-600">Chargement…</div>;
+  }
+
+  // ==== UI normale ====
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
@@ -533,9 +613,7 @@ const handleSubmit = async () => {
           <div className="flex items-center justify-between py-4">
             <div className="flex items-center space-x-4">
               <h1 className="text-xl font-bold text-gray-900">{exam.title}</h1>
-              <span className="px-3 py-1 bg-red-100 text-red-800 text-sm font-medium rounded-full">
-                EXAMEN EN COURS
-              </span>
+              <span className="px-3 py-1 bg-red-100 text-red-800 text-sm font-medium rounded-full">EXAMEN EN COURS</span>
             </div>
             <div className="flex items-center space-x-6">
               <div className="flex items-center space-x-2">
@@ -546,7 +624,21 @@ const handleSubmit = async () => {
               </div>
 
               <button
-                onClick={audioEnabled ? toggleAudio : toggleAudio}
+                onClick={async () => {
+                  try {
+                    if (!audioEnabled) {
+                      const a = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                      const track = a.getAudioTracks()[0];
+                      audioTrack.current = track;
+                      setAudioEnabled(true);
+                      for (const pc of peers.current.values()) pc.addTrack(track, new MediaStream([track]));
+                      if (camStream.current) camStream.current.addTrack(track);
+                    } else {
+                      setAudioEnabled(false);
+                      if (audioTrack.current) audioTrack.current.enabled = false;
+                    }
+                  } catch { toast.error('Micro non disponible.'); }
+                }}
                 className={`inline-flex items-center gap-2 px-3 py-1 rounded-md ${audioEnabled ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-700'}`}
                 title={audioEnabled ? 'Couper le micro' : 'Activer le micro'}
               >
@@ -565,7 +657,9 @@ const handleSubmit = async () => {
 
               <div className="flex items-center space-x-2">
                 <Clock className="h-5 w-5 text-orange-600" />
-                <span className="text-lg font-mono font-bold text-orange-600">{formatTime(timeLeft)}</span>
+                <span className="text-lg font-mono font-bold text-orange-600">
+                  {formatTime(timeLeft)}
+                </span>
               </div>
               {focusWarnings > 0 && (
                 <div className="flex items-center space-x-2">

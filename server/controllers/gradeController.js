@@ -2,6 +2,25 @@
 const gradeService = require('../services/gradeService');
 const reportsService = require('../services/reportsService');
 
+/* ============== ÉTUDIANT ============== */
+exports.studentGrades = async (req, res, next) => {
+  try {
+    const studentId = req.user.id;
+    const { from, to, q, status } = req.query; // optionnels
+    const rows = await gradeService.listStudentGrades(studentId, { from, to, q, status });
+    res.json({ items: rows, total: rows.length });
+  } catch (e) {
+    // Ajout de logs utiles
+    console.error('GET /api/grades/student failed:', e && e.code, e && e.message);
+    // Si c'est une colonne inconnue, on renvoie un message clair (sinon, middleware d'erreur gère)
+    if (e && e.code === '42703') {
+      return res.status(500).json({ error: 'La base ne contient pas toutes les colonnes attendues pour /api/grades/student. La requête a été ajustée mais a échoué.' });
+    }
+    next(e);
+  }
+};
+
+/* ============== ENSEIGNANT ============== */
 exports.listSessions = async (req, res, next) => {
   try {
     const teacherId = req.user.id;

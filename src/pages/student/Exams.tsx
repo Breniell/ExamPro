@@ -1,6 +1,5 @@
-// src/pages/student/Exams.tsx
 import React, { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { toast } from 'react-hot-toast';
 import { apiService } from '../../services/api';
 import { Calendar, Clock } from 'lucide-react';
@@ -12,6 +11,7 @@ type StudentExam = {
 };
 
 export default function StudentExams() {
+  const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [available, setAvailable] = useState<StudentExam[]>([]);
   const [upcoming, setUpcoming]   = useState<StudentExam[]>([]);
@@ -35,6 +35,28 @@ export default function StudentExams() {
     })();
   }, []);
 
+  async function preflightAndStart(id: string) {
+    // 1) Pré-check caméra pour éviter le ping-pong
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      // on ferme immédiatement (StudentExam redemandera, désormais sans popup)
+      s.getTracks().forEach(t => t.stop());
+    } catch {
+      toast.error('Autorisez la caméra pour commencer.');
+      return;
+    }
+
+    // 2) Optionnel: preflight start côté API pour remonter l’erreur ici
+    try {
+      await apiService.startExamSession(id);
+      // si ok, on va sur la page examen (elle récupérera la session)
+      navigate(`/student/exam/${id}`);
+    } catch (e: any) {
+      // exemples: 409 déjà soumis, 403 examen fermé, etc.
+      toast.error(e?.message || 'Examen indisponible.');
+    }
+  }
+
   if (loading) return <div className="min-h-[40vh] grid place-items-center text-gray-600">Chargement…</div>;
 
   return (
@@ -57,9 +79,12 @@ export default function StudentExams() {
                 {e.teacherFirst && <span className="text-gray-500">— {e.teacherFirst} {e.teacherLast}</span>}
               </div>
             </div>
-            <Link to={`/student/exam/${e.id}`} className="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-md hover:bg-indigo-700">
+            <button
+              onClick={() => preflightAndStart(e.id)}
+              className="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-md hover:bg-indigo-700"
+            >
               Commencer
-            </Link>
+            </button>
           </div>
         ))}
       </div>
