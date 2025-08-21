@@ -160,28 +160,26 @@ export default function StudentExam() {
 
     sock.on('connect_error', () => toast.error('Connexion au centre de contrôle indisponible (WS).'));
 
-        // L’admin demande une offre
-        sock.on('request-offer', async ({ adminSocketId, sessionId }) => {
-          if (!sess?.id || sessionId !== sess.id) return;
+    // L’admin demande une offre
+    sock.on('request-offer', async ({ adminSocketId, sessionId }) => {
+      if (!sess?.id || sessionId !== sess.id) return;
 
-          // si un PC existait déjà pour cet admin → ferme-le pour repartir clean
-          const old = peers.current.get(adminSocketId);
-          if (old) {
-            try { old.close(); } catch {}
-            peers.current.delete(adminSocketId);
-          }
-          await createAndSendOffer(adminSocketId);
-        });
+      // si un PC existait déjà pour cet admin → ferme-le pour repartir clean
+      const old = peers.current.get(adminSocketId);
+      if (old) {
+        try { old.close(); } catch {}
+        peers.current.delete(adminSocketId);
+      }
+      await createAndSendOffer(adminSocketId);
+    });
 
-
-        // Réponse admin
-        sock.on('webrtc-answer', async ({ from, description }) => {
-          const pc = peers.current.get(from);
-          if (pc && description?.type === 'answer') {
-            try { await pc.setRemoteDescription(new RTCSessionDescription(description)); } catch {}
-          }
-        });
-
+    // Réponse admin
+    sock.on('webrtc-answer', async ({ from, description }) => {
+      const pc = peers.current.get(from);
+      if (pc && description?.type === 'answer') {
+        try { await pc.setRemoteDescription(new RTCSessionDescription(description)); } catch {}
+      }
+    });
 
     sock.on('webrtc-ice-candidate', async ({ from, candidate }) => {
       const pc = peers.current.get(from);
@@ -296,7 +294,7 @@ export default function StudentExam() {
       setTimeLeft((s) => {
         if (s <= 1) {
           clearInterval(t);
-          if (!submittedRef.current) handleSubmit(); // soumission auto
+          if (!submittedRef.current) handleSubmit({ skipConfirm: true }); // ✅ auto-soumission sans confirm
           return 0;
         }
         return s - 1;
@@ -364,13 +362,15 @@ export default function StudentExam() {
     return { ok: true };
   }
 
-  const handleSubmit = async () => {
+  const handleSubmit = async (opts?: { skipConfirm?: boolean }) => {
     if (!session?.id || !exam) return;
 
-    const confirmed = window.confirm(
-      "Confirmer la soumission ?\n\nAprès validation, vous ne pourrez plus modifier vos réponses."
-    );
-    if (!confirmed) return;
+    if (!opts?.skipConfirm) {
+      const confirmed = window.confirm(
+        "Confirmer la soumission ?\n\nAprès validation, vous ne pourrez plus modifier vos réponses."
+      );
+      if (!confirmed) return;
+    }
 
     const check = validateBeforeSubmit(exam, answers);
     if (!check.ok) {
@@ -403,8 +403,16 @@ export default function StudentExam() {
           time_spent: Math.max(0, Math.floor(timeSpent.current[qq.id] || 0)),
         };
 
-        if (qq.type === 'qcm' || qq.type === 'true_false') {
-          payload.selected_option = val || null;
+        if (qq.type === 'qcm') {
+          const opts = optionsToArray(qq.options);
+          const idx = opts.findIndex(o => o === val);
+          payload.selected_option = idx >= 0 ? idx : null; // INT attendu par le backend
+          payload.answer_text = null;
+        } else if (qq.type === 'true_false') {
+          const raw = optionsToArray(qq.options);
+          const tf = raw.length === 2 ? raw : ['Vrai', 'Faux'];
+          const idx = tf.findIndex(o => o === val);
+          payload.selected_option = idx >= 0 ? idx : null; // INT attendu par le backend
           payload.answer_text = null;
         } else {
           payload.answer_text = val || '';
@@ -732,7 +740,7 @@ export default function StudentExam() {
             {currentIdx === list.length - 1 && (
               <div className="mt-6 pt-6 border-t border-gray-200">
                 <button
-                  onClick={handleSubmit}
+                  onClick={() => handleSubmit()}
                   disabled={isSubmitting}
                   className="w-full flex items-center justify-center px-6 py-3 text-base font-medium rounded-md text-white bg-green-600 hover:bg-green-700 disabled:opacity-50"
                 >
