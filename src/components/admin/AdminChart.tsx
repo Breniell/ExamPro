@@ -1,32 +1,15 @@
 import React, { useEffect, useState } from 'react';
 import {
   Chart as ChartJS,
-  CategoryScale,
-  LinearScale,
-  PointElement,
-  LineElement,
-  BarElement,
-  Title,
-  Tooltip,
-  Legend,
-  Filler,
+  registerables,           // ⬅️ enregistre tout (controllers, elements, scales, plugins)
   ChartData,
   ChartOptions,
 } from 'chart.js';
 import { Chart } from 'react-chartjs-2';
 import { apiService } from '../../services/api';
 
-ChartJS.register(
-  CategoryScale,
-  LinearScale,
-  PointElement,
-  LineElement,
-  BarElement,
-  Title,
-  Tooltip,
-  Legend,
-  Filler
-);
+// Enregistre toute la suite Chart.js v4 (bar/line controllers inclus)
+ChartJS.register(...registerables);
 
 type StatsPayload = {
   labels: string[];
@@ -41,7 +24,7 @@ const AdminChart: React.FC = () => {
   useEffect(() => {
     (async () => {
       try {
-        const stats = await apiService.getAdminChartStats(); // endpoint backend => /api/admin/charts/overview
+        const stats = await apiService.getAdminChartStats(); // /api/admin/charts/overview
         setDataPayload(stats);
       } catch (e) {
         console.error('Erreur chargement graphiques admin:', e);
@@ -86,23 +69,11 @@ const AdminChart: React.FC = () => {
     maintainAspectRatio: false,
     plugins: {
       legend: { position: 'top' },
-      title: {
-        display: true,
-        text: 'Évolution mensuelle des utilisateurs et examens',
-        font: { size: 16 },
-      },
-      tooltip: {
-        mode: 'index',
-        intersect: false,
-      },
+      title: { display: true, text: 'Évolution mensuelle des utilisateurs et examens', font: { size: 16 } },
+      tooltip: { mode: 'index', intersect: false },
     },
     interaction: { mode: 'nearest', axis: 'x', intersect: false },
-    scales: {
-      y: {
-        beginAtZero: true,
-        ticks: { precision: 0 },
-      },
-    },
+    scales: { y: { beginAtZero: true, ticks: { precision: 0 } } },
   };
 
   return (
