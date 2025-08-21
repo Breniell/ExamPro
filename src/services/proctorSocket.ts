@@ -30,15 +30,15 @@ export function iceServers() {
   const env: any = import.meta.env;
   const servers: RTCIceServer[] = [];
 
-  if (env?.VITE_STUN_URL) {
-    servers.push({ urls: env.VITE_STUN_URL });
-  } else {
-    servers.push({ urls: 'stun:stun.l.google.com:19302' });
-  }
+  // STUN (ok si tu gardes Google ou Metered)
+  if (env?.VITE_STUN_URL) servers.push({ urls: env.VITE_STUN_URL });
+  else servers.push({ urls: 'stun:stun.l.google.com:19302' });
 
+  // TURN (plusieurs URLs séparées par des virgules)
   if (env?.VITE_TURN_URL && env?.VITE_TURN_USERNAME && env?.VITE_TURN_CREDENTIAL) {
+    const urls = String(env.VITE_TURN_URL).split(',').map((s: string) => s.trim()).filter(Boolean);
     servers.push({
-      urls: env.VITE_TURN_URL,
+      urls,
       username: env.VITE_TURN_USERNAME,
       credential: env.VITE_TURN_CREDENTIAL,
     });

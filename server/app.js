@@ -67,6 +67,8 @@ app.use('/api/auth', authRoutes);
 // Examens
 app.use('/api/exams', examRoutes);
 
+app.use('/api/admin/charts', require('./routes/adminCharts'));
+
 // Sessions d’examen
 app.use('/api/sessions', sessionRoutes);
 
