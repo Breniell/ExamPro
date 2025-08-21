@@ -15,6 +15,19 @@ type User = {
   createdAt: string;
 };
 
+function normalizeUserRow(r: any): User {
+  return {
+    id: r.id ?? r.user_id ?? r.uuid ?? '',
+    firstName: r.firstName ?? r.first_name ?? r.firstname ?? '',
+    lastName: r.lastName ?? r.last_name ?? r.lastname ?? '',
+    email: r.email ?? '',
+    role: (r.role ?? 'student') as User['role'],
+    isActive: (r.isActive ?? r.is_active ?? true) as boolean,
+    lastLogin: r.lastLogin ?? r.last_login ?? null,
+    createdAt: r.createdAt ?? r.created_at ?? new Date().toISOString(),
+  };
+}
+
 export default function AdminUsers() {
   const [loading, setLoading] = useState(true);
   const [users, setUsers] = useState<User[]>([]);
@@ -24,24 +37,34 @@ export default function AdminUsers() {
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [formData, setFormData] = useState({ firstName: '', lastName: '', email: '', role: 'student', password: '' });
 
+  const [showEditForm, setShowEditForm] = useState(false);
+  const [editTarget, setEditTarget] = useState<User | null>(null);
+  const [editData, setEditData] = useState({ firstName: '', lastName: '', email: '', role: 'student', password: '' });
+
   const load = async () => {
-  setLoading(true);
-  try {
-    const params: any = {};
-    if (filterRole !== 'all') params.role = filterRole;
-    if (searchTerm.trim()) params.search = searchTerm.trim();
-    const data = await apiService.getUsers(params);
-    setUsers(data || []);
-  } catch (e) {
-    toast.error('Impossible de charger les utilisateurs.');
-  } finally {
-    setLoading(false);
-  }
-};
+    setLoading(true);
+    try {
+      const params: any = {};
+      if (filterRole !== 'all') params.role = filterRole;
+      if (searchTerm.trim()) params.search = searchTerm.trim();
+      const data = await apiService.getUsers(params);
 
+      const rows: any[] =
+        Array.isArray(data) ? data
+        : Array.isArray((data as any)?.items) ? (data as any).items
+        : Array.isArray((data as any)?.users) ? (data as any).users
+        : [];
 
-  useEffect(() => { load(); /* load on first */ }, []);
-  // Reload quand les filtres changent (debounce simple)
+      setUsers(rows.map(normalizeUserRow));
+    } catch (e) {
+      toast.error('Impossible de charger les utilisateurs.');
+      setUsers([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(); }, []);
   useEffect(() => {
     const t = setTimeout(load, 250);
     return () => clearTimeout(t);
@@ -50,13 +73,54 @@ export default function AdminUsers() {
   const createUser = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      await apiService.createUser(formData);
+      await apiService.createUser({
+        firstName: formData.firstName,
+        lastName: formData.lastName,
+        email: formData.email,
+        role: formData.role,
+        password: formData.password,
+      });
       toast.success('Utilisateur créé');
       setShowCreateForm(false);
       setFormData({ firstName: '', lastName: '', email: '', role: 'student', password: '' });
       load();
     } catch (e:any) {
       toast.error(e?.message || 'Création impossible');
+    }
+  };
+
+  const openEdit = (u: User) => {
+    setEditTarget(u);
+    setEditData({
+      firstName: u.firstName,
+      lastName: u.lastName,
+      email: u.email,
+      role: u.role,
+      password: '',
+    });
+    setShowEditForm(true);
+  };
+
+  const saveEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editTarget) return;
+
+    // Patch minimal (seuls champs modifiés)
+    const patch: any = {};
+    if (editData.firstName !== editTarget.firstName) patch.firstName = editData.firstName;
+    if (editData.lastName !== editTarget.lastName) patch.lastName = editData.lastName;
+    if (editData.email !== editTarget.email) patch.email = editData.email;
+    if (editData.role !== editTarget.role) patch.role = editData.role;
+    if (editData.password.trim()) patch.password = editData.password.trim();
+
+    try {
+      await apiService.updateUser(editTarget.id, patch);
+      setUsers(prev => prev.map(x => x.id === editTarget.id ? normalizeUserRow({ ...x, ...patch }) : x));
+      toast.success('Utilisateur mis à jour');
+      setShowEditForm(false);
+      setEditTarget(null);
+    } catch (e:any) {
+      toast.error(e?.message || 'Mise à jour impossible');
     }
   };
 
@@ -181,6 +245,77 @@ export default function AdminUsers() {
         </div>
       )}
 
+      {/* Edit Modal */}
+      {showEditForm && editTarget && (
+        <div className="fixed inset-0 bg-black/50 grid place-items-center z-50">
+          <div className="bg-white rounded-lg p-6 w-full max-w-md">
+            <h2 className="text-xl font-bold text-gray-900 mb-4">Modifier l’utilisateur</h2>
+            <form onSubmit={saveEdit} className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <label className="block text-sm font-medium text-gray-700">
+                  Prénom
+                  <input
+                    className="mt-1 w-full px-3 py-2 border rounded-md focus:ring-indigo-500 focus:border-indigo-500"
+                    value={editData.firstName}
+                    onChange={e => setEditData(p => ({ ...p, firstName: e.target.value }))}
+                    required
+                  />
+                </label>
+                <label className="block text-sm font-medium text-gray-700">
+                  Nom
+                  <input
+                    className="mt-1 w-full px-3 py-2 border rounded-md focus:ring-indigo-500 focus:border-indigo-500"
+                    value={editData.lastName}
+                    onChange={e => setEditData(p => ({ ...p, lastName: e.target.value }))}
+                    required
+                  />
+                </label>
+              </div>
+              <label className="block text-sm font-medium text-gray-700">
+                Email
+                <input
+                  type="email"
+                  className="mt-1 w-full px-3 py-2 border rounded-md focus:ring-indigo-500 focus:border-indigo-500"
+                  value={editData.email}
+                  onChange={e => setEditData(p => ({ ...p, email: e.target.value }))}
+                  required
+                />
+              </label>
+              <label className="block text-sm font-medium text-gray-700">
+                Rôle
+                <select
+                  className="mt-1 w-full px-3 py-2 border rounded-md focus:ring-indigo-500 focus:border-indigo-500"
+                  value={editData.role}
+                  onChange={e => setEditData(p => ({ ...p, role: e.target.value }))}
+                >
+                  <option value="student">Étudiant</option>
+                  <option value="teacher">Enseignant</option>
+                  <option value="admin">Administrateur</option>
+                </select>
+              </label>
+              <label className="block text-sm font-medium text-gray-700">
+                Nouveau mot de passe (optionnel)
+                <input
+                  type="password"
+                  placeholder="Laisser vide pour ne pas changer"
+                  className="mt-1 w-full px-3 py-2 border rounded-md focus:ring-indigo-500 focus:border-indigo-500"
+                  value={editData.password}
+                  onChange={e => setEditData(p => ({ ...p, password: e.target.value }))}
+                />
+              </label>
+              <div className="flex justify-end gap-2 pt-2">
+                <button type="button" onClick={() => { setShowEditForm(false); setEditTarget(null); }} className="px-4 py-2 bg-gray-100 rounded-md">
+                  Annuler
+                </button>
+                <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700">
+                  Enregistrer
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Filtres */}
       <div className="bg-white p-4 rounded-lg shadow">
         <div className="flex items-center gap-4">
@@ -255,7 +390,11 @@ export default function AdminUsers() {
                         >
                           {u.isActive ? <UserX className="h-4 w-4" /> : <UserCheck className="h-4 w-4" />}
                         </button>
-                        <button className="text-indigo-600 hover:text-indigo-900" title="Éditer (à implémenter)">
+                        <button
+                          onClick={() => openEdit(u)}
+                          className="text-indigo-600 hover:text-indigo-900"
+                          title="Éditer"
+                        >
                           <Edit className="h-4 w-4" />
                         </button>
                         <button onClick={() => deleteUser(u.id)} className="text-red-600 hover:text-red-900" title="Supprimer">

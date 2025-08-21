@@ -266,6 +266,66 @@ class ApiService {
     }
   }
 
+
+  // ---------- Admin (users) ----------
+  async createUser(user: {
+    firstName: string;
+    lastName: string;
+    email: string;
+    role: 'student' | 'teacher' | 'admin';
+    password: string;
+    isActive?: boolean;
+  }) {
+    const payload = {
+      first_name: user.firstName,
+      last_name: user.lastName,
+      email: user.email,
+      role: user.role,
+      password: user.password,
+      is_active: user.isActive ?? true,
+    };
+    return this.requestJSON('/admin/users', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async updateUser(id: string, patch: Partial<{
+    firstName: string;
+    lastName: string;
+    email: string;
+    role: 'student' | 'teacher' | 'admin';
+    password: string;
+    isActive: boolean;
+  }>) {
+    // camelCase -> snake_case
+    const map: Record<string, string> = {
+      firstName: 'first_name',
+      lastName: 'last_name',
+      email: 'email',
+      role: 'role',
+      password: 'password',
+      isActive: 'is_active',
+    };
+    const body: any = {};
+    Object.entries(patch).forEach(([k, v]) => {
+      if (v === undefined) return;
+      const kk = map[k] || k;
+      body[kk] = v;
+    });
+
+    return this.requestJSON(`/admin/users/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    });
+  }
+
+  async deleteUser(id: string) {
+    return this.requestJSON(`/admin/users/${id}`, {
+      method: 'DELETE',
+    });
+  }
+
     // ---------- Admin / Charts ----------
   async getAdminChartStats(): Promise<{ labels: string[]; userCounts: number[]; examCounts: number[]; }> {
     try {
