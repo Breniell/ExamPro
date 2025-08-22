@@ -1,18 +1,38 @@
 // src/pages/admin/Users.tsx
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Plus, Edit, Trash2, Search, Filter, UserCheck, UserX, Loader2 } from 'lucide-react';
 import { apiService } from '../../services/api';
 import { toast } from 'react-hot-toast';
+
+// --- Types ---
+type Role = 'student' | 'teacher' | 'admin';
+type FilterRole = 'all' | Role;
 
 type User = {
   id: string;
   firstName: string;
   lastName: string;
   email: string;
-  role: 'student'|'teacher'|'admin';
+  role: Role;
   isActive: boolean;
   lastLogin: string | null;
   createdAt: string;
+};
+
+type CreateUserForm = {
+  firstName: string;
+  lastName: string;
+  email: string;
+  role: Role;
+  password: string;
+};
+
+type EditUserForm = {
+  firstName: string;
+  lastName: string;
+  email: string;
+  role: Role;
+  password: string; // vide si pas de changement
 };
 
 function normalizeUserRow(r: any): User {
@@ -21,7 +41,7 @@ function normalizeUserRow(r: any): User {
     firstName: r.firstName ?? r.first_name ?? r.firstname ?? '',
     lastName: r.lastName ?? r.last_name ?? r.lastname ?? '',
     email: r.email ?? '',
-    role: (r.role ?? 'student') as User['role'],
+    role: (r.role ?? 'student') as Role,
     isActive: (r.isActive ?? r.is_active ?? true) as boolean,
     lastLogin: r.lastLogin ?? r.last_login ?? null,
     createdAt: r.createdAt ?? r.created_at ?? new Date().toISOString(),
@@ -32,14 +52,26 @@ export default function AdminUsers() {
   const [loading, setLoading] = useState(true);
   const [users, setUsers] = useState<User[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
-  const [filterRole, setFilterRole] = useState<'all'|'student'|'teacher'|'admin'>('all');
+  const [filterRole, setFilterRole] = useState<FilterRole>('all');
 
   const [showCreateForm, setShowCreateForm] = useState(false);
-  const [formData, setFormData] = useState({ firstName: '', lastName: '', email: '', role: 'student', password: '' });
+  const [formData, setFormData] = useState<CreateUserForm>({
+    firstName: '',
+    lastName: '',
+    email: '',
+    role: 'student',
+    password: '',
+  });
 
   const [showEditForm, setShowEditForm] = useState(false);
   const [editTarget, setEditTarget] = useState<User | null>(null);
-  const [editData, setEditData] = useState({ firstName: '', lastName: '', email: '', role: 'student', password: '' });
+  const [editData, setEditData] = useState<EditUserForm>({
+    firstName: '',
+    lastName: '',
+    email: '',
+    role: 'student',
+    password: '',
+  });
 
   const load = async () => {
     setLoading(true);
@@ -77,7 +109,7 @@ export default function AdminUsers() {
         firstName: formData.firstName,
         lastName: formData.lastName,
         email: formData.email,
-        role: formData.role,
+        role: formData.role, // <-- maintenant typé Role
         password: formData.password,
       });
       toast.success('Utilisateur créé');
@@ -105,7 +137,6 @@ export default function AdminUsers() {
     e.preventDefault();
     if (!editTarget) return;
 
-    // Patch minimal (seuls champs modifiés)
     const patch: any = {};
     if (editData.firstName !== editTarget.firstName) patch.firstName = editData.firstName;
     if (editData.lastName !== editTarget.lastName) patch.lastName = editData.lastName;
@@ -145,7 +176,7 @@ export default function AdminUsers() {
     }
   };
 
-  const getRoleBadge = (role: string) =>
+  const getRoleBadge = (role: Role) =>
     role === 'admin' ? (
       <span className="px-2 py-1 bg-red-100 text-red-800 text-xs font-medium rounded-full">Admin</span>
     ) : role === 'teacher' ? (
@@ -214,7 +245,7 @@ export default function AdminUsers() {
                 <select
                   className="mt-1 w-full px-3 py-2 border rounded-md focus:ring-indigo-500 focus:border-indigo-500"
                   value={formData.role}
-                  onChange={e => setFormData(p => ({ ...p, role: e.target.value }))}
+                  onChange={e => setFormData(p => ({ ...p, role: e.target.value as Role }))} // <-- cast ici
                 >
                   <option value="student">Étudiant</option>
                   <option value="teacher">Enseignant</option>
@@ -286,7 +317,7 @@ export default function AdminUsers() {
                 <select
                   className="mt-1 w-full px-3 py-2 border rounded-md focus:ring-indigo-500 focus:border-indigo-500"
                   value={editData.role}
-                  onChange={e => setEditData(p => ({ ...p, role: e.target.value }))}
+                  onChange={e => setEditData(p => ({ ...p, role: e.target.value as Role }))} // <-- cast ici
                 >
                   <option value="student">Étudiant</option>
                   <option value="teacher">Enseignant</option>
@@ -333,7 +364,7 @@ export default function AdminUsers() {
             <Filter className="h-4 w-4 text-gray-600" />
             <select
               value={filterRole}
-              onChange={e => setFilterRole(e.target.value as any)}
+              onChange={e => setFilterRole(e.target.value as FilterRole)}  // <-- cast ici
               className="border rounded-md px-3 py-2 focus:ring-indigo-500 focus:border-indigo-500"
             >
               <option value="all">Tous les rôles</option>
