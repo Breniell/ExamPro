@@ -40,16 +40,20 @@ router.post(
   ],
   adminController.createUser
 );
+
 router.put(
   '/users/:id',
   [
+    body('email').optional().isEmail().normalizeEmail(),
+    body('password').optional().isLength({ min: 6 }),
     body('firstName').optional().notEmpty(),
     body('lastName').optional().notEmpty(),
     body('role').optional().isIn(['student', 'teacher', 'admin']),
-    body('isActive').optional().isBoolean()
+    body('isActive').optional().isBoolean(),
   ],
   adminController.updateUser
 );
+
 router.delete('/users/:id', adminController.deleteUser);
 
 // Logs sécurité

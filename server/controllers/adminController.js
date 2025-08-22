@@ -107,17 +107,24 @@ exports.listUsers = async (req, res) => {
   }
 };
 
+// server/controllers/adminController.js (remplace createUser et updateUser)
+
 exports.createUser = async (req, res) => {
   const errs = validationResult(req);
   if (!errs.isEmpty()) return res.status(400).json({ errors: errs.array() });
 
   try {
     const { email, password, firstName, lastName, role } = req.body;
-    const passwordHash = await bcrypt.hash(password, parseInt(process.env.BCRYPT_ROUNDS));
+    const rounds = parseInt(process.env.BCRYPT_ROUNDS || '12', 10);
+    const passwordHash = await bcrypt.hash(password, rounds);
     const user = await adminService.createUser({ email, passwordHash, firstName, lastName, role });
     res.status(201).json(user);
   } catch (err) {
     console.error('Create user error:', err);
+    // gère unique violation proprement
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'Cet email est déjà utilisé.' });
+    }
     res.status(err.status || 500).json({ error: err.message });
   }
 };
@@ -127,13 +134,26 @@ exports.updateUser = async (req, res) => {
   if (!errs.isEmpty()) return res.status(400).json({ errors: errs.array() });
 
   try {
-    const user = await adminService.updateUser(req.params.id, req.body);
+    const data = { ...req.body };
+
+    if (data.password) {
+      const rounds = parseInt(process.env.BCRYPT_ROUNDS || '12', 10);
+      data.passwordHash = await bcrypt.hash(String(data.password), rounds);
+      delete data.password;
+    }
+
+    const user = await adminService.updateUser(req.params.id, data);
+    if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
     res.json(user);
   } catch (err) {
     console.error('Update user error:', err);
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'Cet email est déjà utilisé.' });
+    }
     res.status(err.status || 500).json({ error: err.message });
   }
 };
+
 
 exports.deleteUser = async (req, res) => {
   try {

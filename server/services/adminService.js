@@ -187,16 +187,23 @@ async function listUsers(filters = {}) {
   return rows;
 }
 
+// server/services/adminService.js (remplace createUser et updateUser)
+
 async function createUser({ email, passwordHash, firstName, lastName, role }) {
-  const { rows } = await db.query(
-    `
-    INSERT INTO users (email, password_hash, first_name, last_name, role, email_verified)
-    VALUES ($1, $2, $3, $4, $5, true)
-    RETURNING id, email, first_name, last_name, role
-  `,
-    [email, passwordHash, firstName, lastName, role]
-  );
-  return rows[0];
+  try {
+    const { rows } = await db.query(
+      `
+      INSERT INTO users (email, password_hash, first_name, last_name, role, email_verified)
+      VALUES ($1, $2, $3, $4, $5, true)
+      RETURNING id, email, first_name, last_name, role
+    `,
+      [email, passwordHash, firstName, lastName, role]
+    );
+    return rows[0];
+  } catch (err) {
+    // Laisse le controller mapper 23505 -> 409
+    throw err;
+  }
 }
 
 async function updateUser(id, data) {
@@ -212,6 +219,10 @@ async function updateUser(id, data) {
     fields.push(`last_name = $${i++}`);
     values.push(data.lastName);
   }
+  if (data.email !== undefined) {
+    fields.push(`email = $${i++}`);
+    values.push(data.email);
+  }
   if (data.role !== undefined) {
     fields.push(`role = $${i++}`);
     values.push(data.role);
@@ -219,6 +230,10 @@ async function updateUser(id, data) {
   if (data.isActive !== undefined) {
     fields.push(`is_active = $${i++}`);
     values.push(!!data.isActive);
+  }
+  if (data.passwordHash !== undefined) {
+    fields.push(`password_hash = $${i++}`);
+    values.push(data.passwordHash);
   }
 
   if (fields.length === 0) {
@@ -242,6 +257,7 @@ async function updateUser(id, data) {
   );
   return rows[0];
 }
+
 
 async function deleteUser(id) {
   await db.query(`DELETE FROM users WHERE id = $1`, [id]);

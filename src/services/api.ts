@@ -39,26 +39,32 @@ class ApiService {
     return { ...base, ...(extra || {}) };
   }
 
-  private async requestJSON(endpoint: string, options: RequestInit = {}) {
-    const url = `${API_BASE_URL}${endpoint}`;
-    const hasBody = !!options.body && !(options.body instanceof FormData);
-    const headers = this.makeHeaders(options.headers, hasBody);
+// src/services/api.ts (remplace les méthodes ci-dessous)
 
-    const response = await fetch(url, { ...options, headers });
-    const contentType = response.headers.get('content-type') || '';
-    const isJSON = contentType.includes('application/json');
-    const data = isJSON ? await response.json().catch(() => null) : null;
+private async requestJSON(endpoint: string, options: RequestInit = {}) {
+  const url = `${API_BASE_URL}${endpoint}`;
+  const hasBody = !!options.body && !(options.body instanceof FormData);
+  const headers = this.makeHeaders(options.headers, hasBody);
 
-    if (!response.ok) {
-      const message =
-        (data && (data.error || data.message)) || `HTTP ${response.status}`;
-      if (response.status === 401 || response.status === 403) {
-        this.clearToken(); // 🔐 purge token
-      }
-      throw new Error(message);
+  const response = await fetch(url, { ...options, headers });
+  const contentType = response.headers.get('content-type') || '';
+  const isJSON = contentType.includes('application/json');
+  const data = isJSON ? await response.json().catch(() => null) : null;
+
+  if (!response.ok) {
+    // ➜ surfacer les erreurs de validation d'express-validator
+    let message =
+      (data && (data.error || data.message)) ||
+      (Array.isArray(data?.errors) ? data.errors.map((e: any) => e.msg).join(', ') : '') ||
+      `HTTP ${response.status}`;
+    if (response.status === 401 || response.status === 403) {
+      this.clearToken();
     }
-    return data;
+    throw new Error(message);
   }
+  return data;
+}
+
 
   private async requestBlob(
     endpoint: string,
@@ -267,64 +273,42 @@ class ApiService {
   }
 
 
-  // ---------- Admin (users) ----------
-  async createUser(user: {
-    firstName: string;
-    lastName: string;
-    email: string;
-    role: 'student' | 'teacher' | 'admin';
-    password: string;
-    isActive?: boolean;
-  }) {
-    const payload = {
-      first_name: user.firstName,
-      last_name: user.lastName,
-      email: user.email,
-      role: user.role,
-      password: user.password,
-      is_active: user.isActive ?? true,
-    };
-    return this.requestJSON('/admin/users', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-  }
+// ---------- Admin / Users ----------
 
-  async updateUser(id: string, patch: Partial<{
+async createUser(user: {
+  firstName: string;
+  lastName: string;
+  email: string;
+  role: 'student'|'teacher'|'admin';
+  password: string;
+  isActive?: boolean;
+}) {
+  return this.requestJSON('/admin/users', {
+    method: 'POST',
+    body: JSON.stringify(user),
+  });
+}
+
+async updateUser(
+  id: string,
+  patch: Partial<{
     firstName: string;
     lastName: string;
     email: string;
-    role: 'student' | 'teacher' | 'admin';
+    role: 'student'|'teacher'|'admin';
     password: string;
     isActive: boolean;
-  }>) {
-    // camelCase -> snake_case
-    const map: Record<string, string> = {
-      firstName: 'first_name',
-      lastName: 'last_name',
-      email: 'email',
-      role: 'role',
-      password: 'password',
-      isActive: 'is_active',
-    };
-    const body: any = {};
-    Object.entries(patch).forEach(([k, v]) => {
-      if (v === undefined) return;
-      const kk = map[k] || k;
-      body[kk] = v;
-    });
+  }>
+) {
+  return this.requestJSON(`/admin/users/${id}`, {
+    method: 'PUT', // <= IMPORTANT : la route serveur est en PUT
+    body: JSON.stringify(patch),
+  });
+}
 
-    return this.requestJSON(`/admin/users/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify(body),
-    });
-  }
-
-  async deleteUser(id: string) {
-    return this.requestJSON(`/admin/users/${id}`, {
-      method: 'DELETE',
-    });
-  }
+async deleteUser(id: string) {
+  return this.requestJSON(`/admin/users/${id}`, { method: 'DELETE' });
+}
 
     // ---------- Admin / Charts ----------
   async getAdminChartStats(): Promise<{ labels: string[]; userCounts: number[]; examCounts: number[]; }> {
